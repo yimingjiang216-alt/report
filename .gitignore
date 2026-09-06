@@ -1,0 +1,21 @@
+# 环境
+.env
+__pycache__/
+*.pyc
+
+# 本地输出（云端用artifacts保存）
+今日简报_*.pdf
+今日简报_*.png
+媒体洞察调研看板_*.csv
+logs/
+
+# 调试文件
+llm_raw.txt
+swap_policy.py
+show_12.py
+show_selected.py
+preview_pdf.py
+
+# 本地启动脚本（云端不需要）
+run_daily_news.cmd
+launcher.py
