@@ -19,12 +19,14 @@ log = logging.getLogger(__name__)
 ANTHROPIC_AUTH_TOKEN = os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("ANTHROPIC_API_KEY") or ""
 _base = os.environ.get("ANTHROPIC_BASE_URL") or os.environ.get("LLM_BASE_URL") or "https://pool.autelrobotics.com"
 LLM_BASE_URL   = _base.rstrip("/") + "/v1"
-LLM_MODEL      = os.environ.get("LLM_MODEL", "claude-sonnet-4-6")
+LLM_MODEL      = os.environ.get("LLM_MODEL", "claude-opus-4-6")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 TO_EMAIL       = [e.strip() for e in os.environ.get("TO_EMAIL", "yimingjiang216@gmail.com").split(",") if e.strip()]
 FROM_EMAIL     = os.environ.get("FROM_EMAIL", "onboarding@resend.dev")
 CSV_PATH       = os.environ.get("CSV_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "媒体洞察调研看板_素材库_表格.csv"))
 RSSHUB_URL     = os.environ.get("RSSHUB_URL", "http://localhost:1200")  # 本地或公共RSSHub
+FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "https://open.feishu.cn/open-apis/bot/v2/hook/f2db3751-5063-4969-a732-54694a70731e")
+FEISHU_SECRET  = os.environ.get("FEISHU_SECRET", "")
 
 
 
@@ -267,8 +269,42 @@ def search_news():
     if not all_articles:
         return [], []
 
-    all_articles.sort(key=lambda x: x.get("weight", 1), reverse=True)
-    candidates = all_articles[:30]
+    # 分桶取样：确保每个赛道都有代表，而不是被AI新闻淹没
+    track_keywords = {
+        "无人机":   ["drone", "dji", "无人机", "evtol", "uav", "unmanned"],
+        "机器人":   ["robot", "机器人", "humanoid", "具身", "robotics"],
+        "芯片":     ["chip", "semi", "芯片", "anandtech", "nvidia blog", "gpu", "算力", "eetimes", "tom's hardware"],
+        "电池储能": ["electrek", "cleantech", "电池", "储能", "battery", "ofweek"],
+    }
+    buckets = {t: [] for t in track_keywords}
+    buckets["AI通用"] = []
+    for art in all_articles:
+        src = (art.get("source", "") or "").lower()
+        title = (art.get("title", "") or "").lower()
+        matched = False
+        for track, kws in track_keywords.items():
+            if any(k in src or k in title for k in kws):
+                buckets[track].append(art)
+                matched = True
+                break
+        if not matched:
+            buckets["AI通用"].append(art)
+
+    # 每个非AI赛道按weight排序取最多5条，AI通用取剩余名额
+    candidates = []
+    TRACK_QUOTA = 5
+    for track in ["无人机", "机器人", "芯片", "电池储能"]:
+        bucket = sorted(buckets[track], key=lambda x: x.get("weight", 1), reverse=True)
+        taken = bucket[:TRACK_QUOTA]
+        candidates.extend(taken)
+        if taken:
+            log.info(f"  赛道[{track}] 取 {len(taken)} 篇（共 {len(bucket)} 篇可选）")
+
+    # AI通用取剩余名额，总数上限40条
+    remaining_quota = max(40 - len(candidates), 20)
+    ai_sorted = sorted(buckets["AI通用"], key=lambda x: x.get("weight", 1), reverse=True)
+    candidates.extend(ai_sorted[:remaining_quota])
+    log.info(f"  赛道[AI通用] 取 {min(remaining_quota, len(ai_sorted))} 篇（共 {len(ai_sorted)} 篇可选）")
     log.info(f"开始 Jina 抓取 {len(candidates)} 篇正文...")
 
     for i, art in enumerate(candidates):
@@ -375,95 +411,80 @@ def summarize_news(raw_results):
     if not raw_results:
         return []
 
-    url_index = {str(i+1): r.get("url", "") for i, r in enumerate(raw_results[:30])}
+    # 素材编号→URL，覆盖全部送LLM的素材
+    url_index = {str(i+1): r.get("url", "") for i, r in enumerate(raw_results)}
 
     materials = "\n\n".join(
         f"[{i+1}] 来源:{r.get('source','')} 作者:{r.get('author','')}\nURL:{r.get('url','')}\n标题:{r['title']}\n正文:\n{r['content'] or r.get('rss_summary','')}"
-        for i, r in enumerate(raw_results[:30])
+        for i, r in enumerate(raw_results)
     )
 
-    user_prompt = f"""以下是精选科技媒体最新文章，请完成三步任务：
+    user_prompt = f"""以下是精选科技媒体最新文章，请对每个独立事件打分并生成简报。
 
-【第一步：初筛12条候选】
-你是一位见过太多风浪的科技产业观察者——读过所有财报、所有创始人传记、经历过无数次"这次不一样"最后都一样的循环。你不会被宏大叙事激动，只关心一件事：**这条新闻背后，到底发生了什么结构性变化？**
+【你的身份】
+你是一位见过太多风浪的科技产业洞察者。你不会被PR稿打动，只关心结构性变化。
 
-对每条新闻，做三层审视：
-1. **穿透表面**：去掉所有PR形容词和情绪词，只看"谁做了什么、产生了什么可验证的结果"
-2. **追问护城河**：这件事是否改变了某家公司的竞争壁垒？是加深了护城河还是被侵蚀了？如果只是常规迭代，不值高分
-3. **时间尺度检验**：这件事3个月后还会被人提起吗？如果只是当天的热闹，降权
+【打分规则】
+对每条新闻做三层审视：
+1. **穿透表面**：去掉所有PR形容词，只看"谁做了什么、产生了什么可验证的结果"
+2. **追问护城河**：是否改变了竞争壁垒？常规迭代不值高分
+3. **时间尺度检验**：3个月后还会被人提起吗？当天热闹降权
 
-降权情形（坚决排除或降低评分）：
-- 宏大愿景掩盖执行细节——只讲战略不讲数据的PR稿
-- 纯融资/收购消息无产品/技术实质——钱大不等于事大
-- "生态系统""全面赋能""深度合作"等空洞话术
-- 信息量低的简讯、快报、综述转载
+必须加权（≥8分）的情形——这些是你的读者最看重的：
+- 技术里程碑：数学证明、世界纪录、benchmark冠军、首次实现某能力（如形式化证明、通过图灵测试等）
+- 重大产品发布：头部公司（OpenAI/Anthropic/Google/Meta/英伟达）发布新一代核心产品
+- 行业格局变化：千亿级投资/并购、重要IPO、核心人物重大发言
+- 安全事故：AI系统失控、逃逸、造成实际损害的事件
+
+降权情形（降低评分或不收录）：
+- 宏大愿景掩盖执行细节的PR稿
+- 常规融资（10亿以下）/常规合作
+- "生态系统""全面赋能"等空洞话术
+- 信息量低的简讯、快报、评测文章
 - 政策/法规/监管类新闻不收录
+- 量子位/虎嗅等媒体的解读分析文章（非一手事件报道），降2-3分
 
-从全部素材中选出最值得关注的12条候选，给每条打score(1-10)。
+【合并与覆盖规则——极其重要】
+- 多条素材报道完全相同的事件 → 合并为一条，source_index写最详细那条的编号
+- 但：不同事件绝对不得合并，即使涉及同一公司
+- 每个独立事件都必须输出一条，即使你认为不重要也要打低分(1-3分)输出，不得遗漏任何独立事件
+- 输出条目数通常在10-20条之间。如果你只输出了不到10条，说明你合并过度，请回头检查是否漏掉了独立事件
+- 例：OpenAI发布模型 vs OpenAI首席科学家发文 vs OpenAI承认安全事件 = 3个不同事件，必须输出3条
 
-【第二步：主编组稿——从12条中选5条"黄金组合"】
-现在你是科技媒体主编，要从12条候选中选出5条组成今日简报。你不是在选"分数最高的5条"，而是在**组一个最有洞察力的版面**。
+【输出要求】
+对合并后的每个独立事件输出：
+1. title: 标题20-25字，直接说事，包含核心主语和关键事实，不要写成两个分句
+2. summary: 130-170字，说清是什么、关键数据/背景、为什么重要/产业影响，每句以句号结尾，不用"本文""该公司"等套话
+3. key_point: ≤25字结论
+4. category: 两层标签，用顿号连接：
 
-选稿原则：
-- **要有发现美的眼睛**：一条"偏科生"（某个维度极强但其他平平）可能比一条"全面但平庸"的更值得入选——一个技术突破性10分的发现，胜过五项都6分的常规新闻
-- **组合价值大于单条价值**：5条合在一起要让读者感到"今天科技圈发生了这些值得关注的事"，而不是"同一件事说了5遍"
-- **同一公司最多1条**：选最能代表该公司此刻处境的那一条
-- **同一事件只选一个角度**：选最有洞察力的那个切入点
-- **不追求多样而牺牲质量**：如果今天确实只有AI大模型有大事，5条全是AI也可以——但必须是5个不同的重大事件
-
-在JSON的前5条中设置 "selected": true，后7条设置 "selected": false。
-前5条的排序逻辑：最能定义今天科技格局变化的排第1。
-
-【第三步：生成简报】
-对12条全部输出：
-1. title: 标题≤20字，直接说事
-2. summary: 说清楚是什么、关键数据/细节、为什么重要。每条严格控制在80-100字之间，不多不少，不用"本文""该公司"等套话，直接陈述事实
-3. key_point: ≤25字一句话结论
-4. category: 两层标签，用顿号连接。判断步骤如下，严格执行：
-
-   【判断步骤一：找核心主角】
-   先问自己：这篇文章的核心主角是谁？去掉所有修饰语，只看主角本质。
-   - 主角是"一个模型/训练方法/推理算法" → AI大模型
-   - 主角是"一家芯片/硬件公司或其产品" → 算力芯片（Nvidia/AMD/Intel/高通/华为昇腾/寒武纪等，不论内容多AI）
-   - 主角是"一台机器人或机器人公司" → 具身机器人（Figure/宇树/智元/Boston Dynamics/特斯拉Optimus等）
-   - 主角是"一架无人机或低空飞行器" → 无人机
-   - 主角是"电池/储能材料/储能公司" → 新型储能
-   - 以上都不是 → 不强行贴赛道，只贴性质标签
-   - 政策/法规/监管类新闻不收录，直接跳过
-
-   【判断步骤二：如有多个赛道交叉】
-   只有当文章的核心事件同时涉及两个赛道的实质内容时才多选。
-   例：Nvidia发布专为LLM推理设计的新芯片架构 → 主角是芯片，但事件直接定义了模型推理能力边界 → "算力芯片、AI大模型"
-   例：Nvidia收购/投资某AI公司 → 主角是芯片公司做资本动作 → 只贴"算力芯片"，不贴AI大模型
-   例：OpenAI发布o3模型 → 主角是模型 → 只贴"AI大模型"
+   【第一层·赛道】判断核心主角：
+   - 模型/训练/推理 → AI大模型
+   - 芯片/硬件公司 → 算力芯片
+   - 机器人/机器人公司 → 具身机器人
+   - 无人机/低空飞行器 → 无人机
+   - 电池/储能 → 新型储能
+   - 以上都不是 → 只贴性质标签
+   - 政策/监管类 → 不收录
 
    【第二层·性质】必选一个：
-   - 技术突破：有具体数据/benchmark/实测结果，能力产生质变，不是PR稿
-   - 产业动态：发布会/合作/收购/战略/组织变化/资本动作
+   - 技术突破：有数据/benchmark，能力质变
+   - 产业动态：发布/合作/收购/战略/资本
 
-   判断例子：
-   Nvidia季度财报超预期 → "算力芯片、产业动态"
-   Claude 4在SWE-bench达62%超所有模型 → "AI大模型、技术突破"
-   特斯拉Optimus在工厂独立完成装配 → "具身机器人、技术突破"
-   DJI发布Mavic 4 Pro → "无人机、产业动态"
-   欧盟AI法案生效 → 不收录（政策类跳过）
-   宁德时代固态电池500Wh/kg量产 → "新型储能、技术突破"
-   Meta与雷朋推出AR眼镜新品 → "产业动态"（主角不属于以上赛道）
-
-   严禁自创标签，标签只能来自：AI大模型/算力芯片/具身机器人/无人机/新型储能/技术突破/产业动态
+   严禁自创标签，只能来自：AI大模型/算力芯片/具身机器人/无人机/新型储能/技术突破/产业动态
 5. sentiment: 正面/负面/中性
 6. cluster_tag: 厂商动态类/技术突破类/行业趋势类/产品评测类/市场情绪类
-7. companies: 涉及公司/产品名称
-8. source_index: 原始素材编号
-9. source_url: 原文URL（直接从原始文章URL字段复制，不要修改）
+7. companies: 涉及的公司/产品名称（重要！代码用此字段做同公司去重，务必准确填写主要公司名）
+8. source_index: 原始素材编号（合并时选最详细那条）
+9. source_url: 留空，代码自动回填
 10. source_name: 来源媒体名
 11. author: 作者，无则留空
 12. score: 重要程度评分(1-10)
-13. selected: true（入选简报前5条）或 false（候选未入选）
+13. selected: 全部填false（由代码决定最终入选）
 14. 字段值不得含英文双引号，改用书名号《》
 
-严格输出 JSON 数组，无其他内容。前5条为入选简报的（selected:true），后7条为候选（selected:false）：
-[{{"index":1,"score":9,"selected":true,"category":"AI大模型","title":"标题","summary":"摘要","key_point":"核心观点","companies":"公司","sentiment":"正面","cluster_tag":"厂商动态类","source_index":"1","source_url":"https://...","source_name":"来源","author":""}}]
+严格输出JSON数组，按score降序排列，无其他内容：
+[{{"index":1,"score":9,"selected":false,"category":"AI大模型、技术突破","title":"标题","summary":"摘要","key_point":"核心观点","companies":"公司","sentiment":"正面","cluster_tag":"厂商动态类","source_index":"1","source_url":"","source_name":"来源","author":""}}]
 
 """
     # 读取上期已发标题，追加跨期去重规则
@@ -487,7 +508,7 @@ def summarize_news(raw_results):
 
     user_prompt += f"""
 {exclude_block}
---- 原始文章（共{len(raw_results[:30])}篇）---
+--- 原始文章（共{len(raw_results)}篇）---
 {materials}
 """
 
@@ -548,10 +569,19 @@ def summarize_news(raw_results):
                     pass
         if parsed:
                 for i, item in enumerate(parsed):
-                    # LLM 直接回填了 source_url 就用它，否则用 source_index 反查
-                    if not item.get("source_url"):
-                        idx = str(item.get("source_index", ""))
-                        item["source_url"] = url_index.get(idx, "")
+                    # URL修正：source_index反查 → 模糊标题匹配兜底
+                    idx = str(item.get("source_index", ""))
+                    if idx in url_index and url_index[idx]:
+                        item["source_url"] = url_index[idx]
+                    else:
+                        # source_index查不到，用标题前10字模糊匹配原始素材
+                        llm_title = re.sub(r"\s+", "", item.get("title", ""))[:10]
+                        if llm_title:
+                            for r in raw_results:
+                                raw_title = re.sub(r"\s+", "", r.get("title", ""))
+                                if llm_title in raw_title and r.get("url"):
+                                    item["source_url"] = r["url"]
+                                    break
                     # ── 标签白名单过滤（只保留合法标签，去掉LLM自创的） ──
                     VALID_CATS = {"AI大模型","算力芯片","具身机器人","无人机","新型储能","技术突破","产业动态"}
                     cat = item.get("category","")
@@ -560,7 +590,212 @@ def summarize_news(raw_results):
                     if clean_cats:
                         item["category"] = "、".join(clean_cats)
 
-                    # ── 联网核查兜底（仅selected条目、仅含"AI大模型"且公司不明确时） ──
+                    # 联网核查移到组稿之后（只对最终selected的5条做）
+
+                # ── 遗漏检查：找出LLM漏掉的非OpenAI独立事件，二次LLM补充打分 ──
+                covered_indices = set()
+                for item in parsed:
+                    si = str(item.get("source_index", ""))
+                    if si:
+                        covered_indices.add(si)
+
+                # 收集LLM已覆盖的标题bigram指纹
+                llm_bigrams_all = set()
+                for item in parsed:
+                    t = re.sub(r"\s+", "", item.get("title", "")).lower()
+                    for k in range(len(t) - 1):
+                        llm_bigrams_all.add(t[k:k+2])
+
+                missed_materials = []
+                for idx, r in enumerate(raw_results):
+                    si = str(idx + 1)
+                    if si in covered_indices:
+                        continue
+                    raw_t = re.sub(r"\s+", "", r.get("title", "")).lower()
+                    raw_bgs = set(raw_t[k:k+2] for k in range(len(raw_t)-1)) if len(raw_t) > 1 else set()
+                    overlap = len(raw_bgs & llm_bigrams_all) if raw_bgs else 0
+                    ratio = overlap / len(raw_bgs) if raw_bgs else 0
+                    if ratio > 0.4:
+                        continue
+                    # 跳过OpenAI重复报道
+                    tl = r.get("title", "").lower()
+                    if any(k in tl for k in ["openai", "gpt-6", "gpt6", "astra", "chatgpt", "altman", "奥尔特曼"]):
+                        continue
+                    missed_materials.append((si, r))
+
+                if missed_materials:
+                    log.info(f"  发现 {len(missed_materials)} 条LLM遗漏的非OpenAI素材，二次补充打分...")
+                    missed_text = "\n\n".join(
+                        f"[{si}] 来源:{r.get('source','')}\n标题:{r['title']}\n正文:\n{(r.get('content') or r.get('rss_summary',''))[:1500]}"
+                        for si, r in missed_materials[:10]
+                    )
+                    patch_prompt = f"""以下素材在第一轮分析中被遗漏，请用同样标准打分并生成简报。
+
+规则：
+- title 20-25字，直接说事，包含核心主语和关键事实，不要写成两个分句
+- summary 130-170字，说清事件、关键数据/背景、产业影响，每句以句号结尾
+- score 1-10分
+- 必须加权≥8分：技术里程碑/首次实现某能力/头部公司新产品/千亿级投资并购/重大IPO/安全事故
+- 降权：媒体解读文降2-3分，快报降权
+- companies 填涉及的主要公司名（不是来源媒体名）
+- category 两层标签(赛道、性质)，仅限：AI大模型/算力芯片/具身机器人/无人机/新型储能 + 技术突破/产业动态
+- source_url 留空，selected 全部false
+- 字段值不得含英文双引号
+
+严格输出JSON数组：
+[{{"index":1,"score":8,"selected":false,"category":"具身机器人、产业动态","title":"标题","summary":"摘要","key_point":"核心","companies":"公司","sentiment":"正面","cluster_tag":"厂商动态类","source_index":"1","source_url":"","source_name":"来源","author":""}}]
+
+--- 遗漏素材 ---
+{missed_text}
+"""
+                    try:
+                        patch_raw = call_llm([
+                            {"role": "system", "content": "你是科技产业洞察者。只输出严格JSON数组，不含markdown标记。"},
+                            {"role": "user",   "content": patch_prompt},
+                        ])
+                        patch_raw = patch_raw.strip()
+                        if patch_raw.startswith("```"):
+                            patch_raw = re.sub(r"^```\w*\n?", "", patch_raw)
+                            patch_raw = re.sub(r"\n?```$", "", patch_raw)
+                        patch_items = json.loads(patch_raw)
+                        if isinstance(patch_items, list):
+                            for pi in patch_items:
+                                pidx = str(pi.get("source_index", ""))
+                                if pidx in url_index and url_index[pidx]:
+                                    pi["source_url"] = url_index[pidx]
+                                pi["selected"] = False
+                                pi["score"] = int(pi.get("score", 0))  # 确保分数为整数
+                                parsed.append(pi)
+                                log.info(f"  补充打分: [{pi.get('title','')}] (分{pi.get('score','')}, 公司:{pi.get('companies','')})")
+                    except Exception as e:
+                        log.warning(f"  二次补充LLM调用失败: {e}")
+                else:
+                    log.info("  LLM覆盖完整，无需补充")
+
+                # ── 统一组稿：质量优先 + 多样性平衡 ──
+                # 读取上期标题（用bigram做模糊匹配）
+                prev_titles_raw = []
+                prev_bigrams_list = []  # 每条上期标题的bigram集合
+                try:
+                    if os.path.exists(last_sent_path):
+                        with open(last_sent_path, encoding="utf-8") as f:
+                            prev_titles_raw = json.load(f).get("titles", [])
+                        for pt in prev_titles_raw:
+                            t = re.sub(r"\s+", "", pt).lower()
+                            bgs = set(t[k:k+2] for k in range(len(t)-1)) if len(t) > 1 else set()
+                            prev_bigrams_list.append(bgs)
+                except Exception:
+                    pass
+                prev_set = set()  # 保留精确匹配兼容
+
+                # 清除所有selected标记，由代码统一决定
+                for item in parsed:
+                    item["selected"] = False
+
+                # 按分数降序排列（int排序，确保类型一致）
+                for item in parsed:
+                    try:
+                        item["score"] = int(item.get("score", 0))
+                    except (ValueError, TypeError):
+                        item["score"] = 0
+                all_sorted = sorted(parsed, key=lambda x: x.get("score", 0), reverse=True)
+                # 调试：输出排序后前8条
+                for _di, _d in enumerate(all_sorted[:8]):
+                    _co = (_d.get("companies","") or "").split("、")[0].split(",")[0].strip().lower()
+                    log.info(f"  排序#{_di+1}: 分{_d.get('score','')} 公司[{_co}] {_d.get('title','')[:25]}")
+
+                def _get_company(item):
+                    c = (item.get("companies", "") or "").split("、")[0].split(",")[0].strip().lower()
+                    return c
+
+                def _get_track(item):
+                    """从category中提取赛道"""
+                    cat = item.get("category", "")
+                    for t in ["算力芯片", "具身机器人", "无人机", "新型储能"]:
+                        if t in cat:
+                            return t
+                    return "AI大模型"
+
+                def _is_dup(item):
+                    """检查跨期重复：bigram重合率>50%就认为是同一事件"""
+                    t = re.sub(r"\s+", "", item.get("title", "")).lower()
+                    if len(t) < 4:
+                        return False
+                    item_bgs = set(t[k:k+2] for k in range(len(t)-1))
+                    for prev_bgs in prev_bigrams_list:
+                        if not prev_bgs:
+                            continue
+                        overlap = len(item_bgs & prev_bgs)
+                        ratio = overlap / min(len(item_bgs), len(prev_bgs))
+                        if ratio > 0.5:
+                            return True
+                    return False
+
+                # === 阶段1：质量优先——按分数降序选 ===
+                # 同公司规则：第1条直接入选；第2条需≥9分才允许（只有真正的重磅才值得同公司占2条）
+                final = []
+                company_count = {}
+                seen_tracks = set()
+                for item in all_sorted:
+                    if len(final) >= 5:
+                        break
+                    if _is_dup(item):
+                        log.info(f"  跨期去重: [{item.get('title','')}]")
+                        continue
+                    company = _get_company(item)
+                    cc = company_count.get(company, 0) if company else 0
+                    if cc >= 2:
+                        continue  # 同公司最多2条
+                    if cc == 1 and item.get("score", 0) < 9:
+                        continue  # 第2条需≥9分
+                    item["selected"] = True
+                    final.append(item)
+                    if company:
+                        company_count[company] = cc + 1
+                    seen_tracks.add(_get_track(item))
+                    log.info(f"  质量入选: [{item.get('title','')}] (公司:{company}[{cc+1}], 分{item.get('score','')}, 赛道:{_get_track(item)})")
+
+                # === 阶段2：放宽同公司到2条——仍按分数降序 ===
+                if len(final) < 5:
+                    company_count = {}
+                    for item in final:
+                        c = _get_company(item)
+                        if c:
+                            company_count[c] = company_count.get(c, 0) + 1
+                    for item in all_sorted:
+                        if len(final) >= 5:
+                            break
+                        if item.get("selected"):
+                            continue
+                        if _is_dup(item):
+                            continue
+                        company = _get_company(item)
+                        if company and company_count.get(company, 0) >= 2:
+                            continue
+                        item["selected"] = True
+                        final.append(item)
+                        if company:
+                            company_count[company] = company_count.get(company, 0) + 1
+                        seen_tracks.add(_get_track(item))
+                        log.info(f"  放宽入选: [{item.get('title','')}] (公司:{company}, 分{item.get('score','')})")
+
+                # === 阶段3：兜底补满 ===
+                if len(final) < 5:
+                    for item in all_sorted:
+                        if len(final) >= 5:
+                            break
+                        if item.get("selected"):
+                            continue
+                        item["selected"] = True
+                        final.append(item)
+                        log.info(f"  兜底入选: [{item.get('title','')}]")
+
+                # 重组：selected在前，其余在后
+                rest = [it for it in all_sorted if not it.get("selected")]
+                parsed = final + rest
+
+                # ── 联网核查兜底（仅最终selected的5条，含"AI大模型"且公司不明确时纠正赛道标签） ──
+                for item in parsed:
                     if item.get("selected") is True and "AI大模型" in item.get("category", ""):
                         company = (item.get("companies", "") or "").split("、")[0].split(",")[0].strip()
                         if company:
@@ -571,41 +806,104 @@ def summarize_news(raw_results):
                                         cats = [c.strip() for c in item["category"].split("、") if c.strip()]
                                         if track not in cats:
                                             cats.insert(0, track)
-                                            # 如果核查发现是芯片/机器人/无人机/储能公司，移除AI大模型
                                             if track != "AI大模型":
                                                 cats = [c for c in cats if c != "AI大模型"]
                                             item["category"] = "、".join(cats)
                                             log.info(f"  联网核查: {company} → {item['category']}")
                                         break
 
-                # ── 跨期去重兜底：selected的5条不得与上期重复，重复的用候选补位 ──
-                try:
-                    if os.path.exists(last_sent_path):
-                        with open(last_sent_path, encoding="utf-8") as f:
-                            prev = json.load(f).get("titles", [])
-                        prev_set = {re.sub(r"\s+", "", t)[:20] for t in prev}
-                        # 找出selected中与上期重复的
-                        for item in parsed:
-                            if item.get("selected") is True:
-                                key = re.sub(r"\s+", "", item.get("title",""))[:20]
-                                if key in prev_set:
-                                    item["selected"] = False
-                                    log.info(f"  跨期去重: [{item.get('title','')}]")
-                        # 如果selected不足5条，从候选中按分数补位
-                        selected = [it for it in parsed if it.get("selected") is True]
-                        candidates = [it for it in parsed if it.get("selected") is not True]
-                        candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
-                        while len(selected) < 5 and candidates:
-                            promoted = candidates.pop(0)
-                            promoted["selected"] = True
-                            selected.append(promoted)
-                            log.info(f"  补位入选: [{promoted.get('title','')}] (分{promoted.get('score','')})")
-                        # 重组：selected在前，候选在后
-                        parsed = selected + candidates
-                except Exception:
-                    pass
+                # ── 出口质量检查：强制修正标题/摘要/URL ──
+                seen_urls = set()
+                for item in parsed:
+                    if not item.get("selected"):
+                        continue
+
+                    # 标题：超过35字时在最后一个逗号前截断（保持语义完整）
+                    title = item.get("title", "")
+                    if len(title) > 35:
+                        # 在最后一个逗号/顿号处截断
+                        cut = title[:35]
+                        for ch in ["，", "、", "："]:
+                            pos = cut.rfind(ch)
+                            if 15 <= pos:
+                                cut = cut[:pos]
+                                break
+                        item["title"] = cut
+                        log.info(f"  标题截断: {title[:45]}... → {item['title']}")
+
+                    # 摘要：保证完整句子，上限180字（A4一页5条放得下）
+                    summary = item.get("summary", "")
+                    if len(summary) > 180:
+                        cut = summary[:180]
+                        best_pos = -1
+                        for ch in ["。", "；"]:
+                            pos = cut.rfind(ch)
+                            if pos >= 100:
+                                best_pos = max(best_pos, pos)
+                        if best_pos >= 100:
+                            cut = cut[:best_pos + 1]
+                        else:
+                            for ch in ["，", ","]:
+                                pos = cut.rfind(ch)
+                                if pos >= 120:
+                                    cut = cut[:pos] + "。"
+                                    break
+                            else:
+                                cut = cut[:180] + "。"
+                        item["summary"] = cut
+                    elif len(summary) < 30:
+                        # 摘要太短（补全条目），用标题补
+                        item["summary"] = item.get("title", "") + "。" + summary if summary else item.get("title", "")
+
+                    # 摘要清理HTML残留
+                    item["summary"] = re.sub(r"<[^>]+>", "", item["summary"]).strip()
+
+                    # URL验证
+                    url = item.get("source_url", "")
+                    if not url or "http" not in url:
+                        # 重新尝试source_index反查
+                        idx = str(item.get("source_index", ""))
+                        if idx in url_index and url_index[idx]:
+                            item["source_url"] = url_index[idx]
+                            url = item["source_url"]
+                        else:
+                            # 标题模糊匹配原始素材URL
+                            item_title = re.sub(r"\s+", "", item.get("title", ""))[:10]
+                            for ri, r in enumerate(raw_results):
+                                raw_t = re.sub(r"\s+", "", r.get("title", ""))[:10]
+                                if item_title and raw_t and item_title in raw_t or raw_t in item_title:
+                                    if r.get("url"):
+                                        item["source_url"] = r["url"]
+                                        url = r["url"]
+                                        item["source_index"] = str(ri + 1)
+                                        log.info(f"  URL模糊匹配: [{item.get('title','')}] → {url[:50]}")
+                                        break
+                            else:
+                                log.warning(f"  URL缺失: [{item.get('title','')}]")
+                    if url in seen_urls:
+                        log.warning(f"  URL重复: [{item.get('title','')}] → {url[:50]}")
+                    seen_urls.add(url)
+
+                    # 公司名清理：去掉RSS源名称
+                    companies = item.get("companies", "") or ""
+                    if "AIHOT" in companies or "RSS" in companies:
+                        # 从标题中重新提取
+                        _known = {"openai":"OpenAI","anthropic":"Anthropic","claude":"Anthropic",
+                                  "nvidia":"英伟达","英伟达":"英伟达","github":"GitHub",
+                                  "google":"Google","meta":"Meta","microsoft":"Microsoft",
+                                  "dji":"DJI","tesla":"Tesla"}
+                        tl = item.get("title","").lower()
+                        detected = [v for k,v in _known.items() if k in tl]
+                        item["companies"] = "、".join(dict.fromkeys(detected)) if detected else ""
 
                 log.info(f"LLM 返回 {len(parsed)} 条简报")
+                # 保存代码处理后的最终结果（供调试）
+                try:
+                    final_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "final_result.json")
+                    with open(final_path, "w", encoding="utf-8") as f:
+                        json.dump(parsed, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
                 return parsed
 
     log.warning("JSON 解析失败，使用兜底内容")
@@ -748,7 +1046,72 @@ def send_email(html_content, subject):
         return False
 
 
-# ── 6. Brief PDF/PNG ──────────────────────────────────────────────────────────
+# ── 5b. 飞书推送 ─────────────────────────────────────────────────────────────
+
+def _feishu_sign(secret):
+    """生成飞书机器人签名"""
+    import hashlib, base64, hmac
+    timestamp = str(int(time.time()))
+    string_to_sign = f"{timestamp}\n{secret}"
+    hmac_code = hmac.new(string_to_sign.encode("utf-8"), digestmod=hashlib.sha256).digest()
+    sign = base64.b64encode(hmac_code).decode("utf-8")
+    return timestamp, sign
+
+
+def send_feishu(news_items, report_date):
+    if not FEISHU_WEBHOOK:
+        log.warning("FEISHU_WEBHOOK not set, skipping")
+        return False
+
+    # 取selected的5条
+    selected = [item for item in news_items if item.get("selected") is True]
+    items = selected[:5] if len(selected) >= 5 else news_items[:5]
+
+    # 构建富文本内容
+    content_lines = []
+    for i, item in enumerate(items, 1):
+        cat = item.get("category", "")
+        title = item.get("title", "")
+        summary = item.get("summary", "")
+        url = item.get("source_url", "")
+
+        title_elem = {"tag": "a", "text": f"{i}. 【{cat}】{title}", "href": url} if url else {"tag": "text", "text": f"{i}. 【{cat}】{title}"}
+        content_lines.append([title_elem])
+        content_lines.append([{"tag": "text", "text": summary}])
+        content_lines.append([{"tag": "text", "text": ""}])  # 空行分隔
+
+    payload = {
+        "msg_type": "post",
+        "content": {
+            "post": {
+                "zh_cn": {
+                    "title": f"📡 科技前沿简报 · {report_date}",
+                    "content": content_lines
+                }
+            }
+        }
+    }
+
+    # 加签名
+    if FEISHU_SECRET:
+        timestamp, sign = _feishu_sign(FEISHU_SECRET)
+        payload["timestamp"] = timestamp
+        payload["sign"] = sign
+
+    try:
+        resp = requests.post(FEISHU_WEBHOOK, json=payload, timeout=15)
+        if resp.status_code == 200 and resp.json().get("code") == 0:
+            log.info("✅ 飞书推送成功！")
+            return True
+        else:
+            log.error(f"❌ 飞书推送失败: {resp.text}")
+            return False
+    except Exception as e:
+        log.error(f"飞书推送异常: {e}")
+        return False
+
+
+# ── 6. Brief PDF ─────────────────────────────────────────────────────────────
 
 def generate_brief(news_items, report_date):
     try:
@@ -897,8 +1260,8 @@ def main():
         log.error("无结果，退出")
         sys.exit(1)
 
-    # ── 过滤7天前旧文章 ──
-    cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    # ── 过滤3天前旧文章（每2天跑一次，3天覆盖足够） ──
+    cutoff = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
     fresh_results = []
     for item in raw_results:
         pub = item.get("pub", "") or item.get("pub_date", "")
@@ -906,7 +1269,7 @@ def main():
         if pub_clean != "未知" and pub_clean[:10] < cutoff:
             continue
         fresh_results.append(item)
-    log.info(f"过滤旧文章: {len(raw_results)} → {len(fresh_results)} 篇（7天内）")
+    log.info(f"过滤旧文章: {len(raw_results)} → {len(fresh_results)} 篇（3天内）")
     raw_results = fresh_results
 
     # ── 保存精选素材清单到 dp3 文件夹，方便溯源 ──
@@ -945,8 +1308,11 @@ def main():
     log.info("【Step 5】写入 CSV...")
     append_to_csv(news_items, report_date)
 
-    log.info("【Step 6】生成 PDF/PNG...")
+    log.info("【Step 6】生成 PDF...")
     generate_brief(news_items, report_date)
+
+    log.info("【Step 7】推送飞书...")
+    send_feishu(news_items, report_date)
 
     # ── 保存本期已发标题，供下期跨期去重 ──
     try:

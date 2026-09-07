@@ -2,14 +2,17 @@ name: 科技前沿简报
 
 on:
   schedule:
-    # UTC时间00:30 = 北京时间08:30，每2天跑一次
+    # UTC 00:30 = 北京时间 08:30，每2天跑一次
     - cron: '30 0 */2 * *'
   workflow_dispatch:  # 支持手动触发
+
+permissions:
+  contents: write  # 允许 git push last_sent.json
 
 jobs:
   run-digest:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -25,6 +28,9 @@ jobs:
         run: |
           pip install -r requirements.txt
           playwright install chromium --with-deps
+
+      - name: Ensure latest last_sent.json
+        run: git pull --rebase origin main || true
 
       - name: Run daily news digest
         env:

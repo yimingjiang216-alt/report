@@ -1,21 +1,46 @@
-# 环境
+# 环境变量
 .env
+
+# Python
 __pycache__/
 *.pyc
 
-# 本地输出（云端用artifacts保存）
+# 本地输出（云端用 artifacts 保存）
 今日简报_*.pdf
 今日简报_*.png
 媒体洞察调研看板_*.csv
 logs/
 
-# 调试文件
+# 调试/临时文件
 llm_raw.txt
-swap_policy.py
-show_12.py
-show_selected.py
-preview_pdf.py
+final_result.json
+syntax_error.txt
 
 # 本地启动脚本（云端不需要）
 run_daily_news.cmd
 launcher.py
+
+# 调试脚本（不进仓库）
+test_*.py
+check_*.py
+show_*.py
+debug_*.py
+swap_*.py
+analyze_*.py
+fix_*.py
+reorder_*.py
+preview_*.py
+list_sources.py
+fetch_xhs_batch.py
+capture_wechat_cookie.py
+get_*.py
+xhs_*.py
+
+# 第三方下载器（不相关）
+XHS-Downloader-master/
+
+# DSH 工作区
+.dsh/
+
+# RSSHub 本地实例
+RSSHub/
