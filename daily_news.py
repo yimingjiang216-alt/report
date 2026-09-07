@@ -401,7 +401,7 @@ def call_llm(messages):
         f"{LLM_BASE_URL}/chat/completions",
         headers={"Authorization": f"Bearer {ANTHROPIC_AUTH_TOKEN}", "Content-Type": "application/json"},
         json={"model": LLM_MODEL, "max_tokens": 8192, "messages": messages},
-        timeout=180,
+        timeout=600,
     )
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"]
