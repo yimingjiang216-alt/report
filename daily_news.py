@@ -1332,15 +1332,27 @@ def main():
     log.info("【Step 7】推送飞书...")
     send_feishu(news_items, report_date)
 
-    # ── 保存本期已发标题，供下期跨期去重 ──
+    # ── 保存本期+上期标题，供跨期去重（保留最近2期=10条） ──
     try:
         selected_items = [item for item in news_items if item.get("selected") is True]
         final_5 = selected_items[:5] if len(selected_items) >= 5 else news_items[:5]
-        sent_titles = [item.get("title", "") for item in final_5]
+        new_titles = [item.get("title", "") for item in final_5]
         last_sent_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_sent.json")
+        # 读取旧标题，合并保留最近2期
+        old_titles = []
+        try:
+            if os.path.exists(last_sent_path):
+                with open(last_sent_path, encoding="utf-8") as f:
+                    old_data = json.load(f)
+                old_titles = old_data.get("titles", [])
+        except Exception:
+            pass
+        # 新标题在前，旧标题在后，最多保留10条（2期×5条）
+        all_titles = new_titles + [t for t in old_titles if t not in new_titles]
+        all_titles = all_titles[:10]
         with open(last_sent_path, "w", encoding="utf-8") as f:
-            json.dump({"titles": sent_titles, "date": report_date}, f, ensure_ascii=False, indent=2)
-        log.info(f"✅ 已保存本期标题到 last_sent.json（{len(sent_titles)} 条）")
+            json.dump({"titles": all_titles, "date": report_date}, f, ensure_ascii=False, indent=2)
+        log.info(f"✅ 已保存去重库到 last_sent.json（{len(all_titles)} 条，含上期）")
     except Exception as e:
         log.warning(f"保存 last_sent.json 失败: {e}")
 
