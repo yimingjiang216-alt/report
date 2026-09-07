@@ -397,14 +397,24 @@ def fetch_aihot_api(limit=30) -> list[dict]:
 def call_llm(messages):
     if not ANTHROPIC_AUTH_TOKEN:
         raise ValueError("ANTHROPIC_AUTH_TOKEN not set")
-    resp = requests.post(
-        f"{LLM_BASE_URL}/chat/completions",
-        headers={"Authorization": f"Bearer {ANTHROPIC_AUTH_TOKEN}", "Content-Type": "application/json"},
-        json={"model": LLM_MODEL, "max_tokens": 8192, "messages": messages},
-        timeout=600,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(
+                f"{LLM_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {ANTHROPIC_AUTH_TOKEN}", "Content-Type": "application/json"},
+                json={"model": LLM_MODEL, "max_tokens": 8192, "messages": messages},
+                timeout=600,
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt < max_retries - 1:
+                wait = 30 * (attempt + 1)
+                log.warning(f"LLM 连接失败 (第{attempt+1}次)，{wait}秒后重试: {e}")
+                time.sleep(wait)
+            else:
+                raise
 
 
 def summarize_news(raw_results):
