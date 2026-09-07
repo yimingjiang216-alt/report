@@ -751,6 +751,23 @@ def summarize_news(raw_results):
                                 return True
                     return False
 
+                def _is_same_event(item, selected_list):
+                    """检查同一批结果内是否有高度相似的条目（同一事件多篇报道）"""
+                    t = re.sub(r"\s+", "", item.get("title", "")).lower()
+                    if len(t) < 4:
+                        return False
+                    item_bgs = set(t[k:k+2] for k in range(len(t)-1))
+                    for sel in selected_list:
+                        st = re.sub(r"\s+", "", sel.get("title", "")).lower()
+                        if len(st) < 4:
+                            continue
+                        sel_bgs = set(st[k:k+2] for k in range(len(st)-1))
+                        overlap = len(item_bgs & sel_bgs)
+                        ratio = overlap / min(len(item_bgs), len(sel_bgs))
+                        if ratio > 0.35:
+                            return True
+                    return False
+
                 # === 阶段1：质量优先——按分数降序选 ===
                 # 同公司硬性限制：每家公司最多1条，不论分数多高
                 final = []
@@ -761,6 +778,9 @@ def summarize_news(raw_results):
                         break
                     if _is_dup(item):
                         log.info(f"  跨期去重: [{item.get('title','')}]")
+                        continue
+                    if _is_same_event(item, final):
+                        log.info(f"  同次去重: [{item.get('title','')[:30]}]")
                         continue
                     company = _get_company(item)
                     cc = company_count.get(company, 0) if company else 0
