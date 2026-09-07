@@ -717,22 +717,32 @@ def summarize_news(raw_results):
                     return "AI大模型"
 
                 def _is_dup(item):
-                    """检查跨期重复：bigram重合率>50%就认为是同一事件"""
+                    """检查跨期重复：bigram重合率>35%就认为是同一事件（降低阈值防止换措辞逃过去重）"""
                     t = re.sub(r"\s+", "", item.get("title", "")).lower()
                     if len(t) < 4:
                         return False
                     item_bgs = set(t[k:k+2] for k in range(len(t)-1))
-                    for prev_bgs in prev_bigrams_list:
+                    # 同时检查摘要的bigram（防止标题完全不同但内容相同）
+                    s = re.sub(r"\s+", "", item.get("summary", "")).lower()
+                    summ_bgs = set(s[k:k+2] for k in range(len(s)-1)) if len(s) > 1 else set()
+                    for pi, prev_bgs in enumerate(prev_bigrams_list):
                         if not prev_bgs:
                             continue
+                        # 标题bigram匹配
                         overlap = len(item_bgs & prev_bgs)
                         ratio = overlap / min(len(item_bgs), len(prev_bgs))
-                        if ratio > 0.5:
+                        if ratio > 0.35:
                             return True
+                        # 摘要也包含上期标题的关键词（兜底）
+                        if summ_bgs:
+                            s_overlap = len(summ_bgs & prev_bgs)
+                            s_ratio = s_overlap / min(len(summ_bgs), len(prev_bgs)) if min(len(summ_bgs), len(prev_bgs)) > 0 else 0
+                            if s_ratio > 0.6:
+                                return True
                     return False
 
                 # === 阶段1：质量优先——按分数降序选 ===
-                # 同公司规则：第1条直接入选；第2条需≥9分才允许（只有真正的重磅才值得同公司占2条）
+                # 同公司硬性限制：每家公司最多1条，不论分数多高
                 final = []
                 company_count = {}
                 seen_tracks = set()
@@ -744,10 +754,8 @@ def summarize_news(raw_results):
                         continue
                     company = _get_company(item)
                     cc = company_count.get(company, 0) if company else 0
-                    if cc >= 2:
-                        continue  # 同公司最多2条
-                    if cc == 1 and item.get("score", 0) < 9:
-                        continue  # 第2条需≥9分
+                    if cc >= 1 and company:
+                        continue  # 同公司硬性最多1条
                     item["selected"] = True
                     final.append(item)
                     if company:
