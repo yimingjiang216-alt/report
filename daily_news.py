@@ -132,7 +132,7 @@ RSS_SOURCES = [
 ]
 
 JINA_MAX_CHARS = 3000
-RSS_PER_SOURCE = 6  # 每2天跑一次，每源取6条覆盖2天
+RSS_PER_SOURCE = 6  # 每天跑一次，每源取6条确保覆盖充分
 JINA_DELAY_SEC = 1.0
 
 CATEGORY_COLORS = {
@@ -1298,7 +1298,7 @@ def main():
         log.error("无结果，退出")
         sys.exit(1)
 
-    # ── 过滤3天前旧文章（每2天跑一次，3天覆盖足够） ──
+    # ── 过滤2天前旧文章（每天跑一次，2天窗口+1天冗余） ──
     cutoff = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
     fresh_results = []
     for item in raw_results:
@@ -1352,13 +1352,13 @@ def main():
     log.info("【Step 7】推送飞书...")
     send_feishu(news_items, report_date)
 
-    # ── 保存本期+上期标题，供跨期去重（保留最近2期=10条） ──
+    # ── 保存本期+前两期标题，供跨期去重（保留最近3期=15条） ──
     try:
         selected_items = [item for item in news_items if item.get("selected") is True]
         final_5 = selected_items[:5] if len(selected_items) >= 5 else news_items[:5]
         new_titles = [item.get("title", "") for item in final_5]
         last_sent_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_sent.json")
-        # 读取旧标题，合并保留最近2期
+        # 读取旧标题，合并保留最近3期
         old_titles = []
         try:
             if os.path.exists(last_sent_path):
@@ -1367,9 +1367,9 @@ def main():
                 old_titles = old_data.get("titles", [])
         except Exception:
             pass
-        # 新标题在前，旧标题在后，最多保留10条（2期×5条）
+        # 新标题在前，旧标题在后，最多保留15条（3期×5条，每天跑需要覆盖更长去重窗口）
         all_titles = new_titles + [t for t in old_titles if t not in new_titles]
-        all_titles = all_titles[:10]
+        all_titles = all_titles[:15]
         with open(last_sent_path, "w", encoding="utf-8") as f:
             json.dump({"titles": all_titles, "date": report_date}, f, ensure_ascii=False, indent=2)
         log.info(f"✅ 已保存去重库到 last_sent.json（{len(all_titles)} 条，含上期）")
