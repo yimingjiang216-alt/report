@@ -1299,7 +1299,7 @@ def main():
         sys.exit(1)
 
     # ── 过滤3天前旧文章（每2天跑一次，3天覆盖足够） ──
-    cutoff = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+    cutoff = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
     fresh_results = []
     for item in raw_results:
         pub = item.get("pub", "") or item.get("pub_date", "")
