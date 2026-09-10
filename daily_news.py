@@ -1113,8 +1113,9 @@ def send_feishu(news_items, report_date):
         summary = item.get("summary", "")
         url = item.get("source_url", "")
 
-        title_elem = {"tag": "a", "text": f"{i}. 【{cat}】{title}", "href": url} if url else {"tag": "text", "text": f"{i}. 【{cat}】{title}"}
-        content_lines.append([title_elem])
+        cat_elem = {"tag": "text", "text": f"{i}. 【{cat}】"}
+        title_elem = {"tag": "a", "text": title, "href": url} if url else {"tag": "text", "text": title}
+        content_lines.append([cat_elem, title_elem])
         content_lines.append([{"tag": "text", "text": summary}])
         content_lines.append([{"tag": "text", "text": ""}])  # 空行分隔
 
