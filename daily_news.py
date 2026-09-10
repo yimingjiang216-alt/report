@@ -596,7 +596,7 @@ def summarize_news(raw_results):
                     VALID_CATS = {"AI大模型","算力芯片","具身机器人","无人机","新型储能","技术突破","产业动态"}
                     cat = item.get("category","")
                     parts = cat.replace("/","、").replace("，","、").replace(",","、").split("、")
-                    clean_cats = [p.strip() for p in parts if p.strip() in VALID_CATS]
+                    clean_cats = list(dict.fromkeys(p.strip() for p in parts if p.strip() in VALID_CATS))  # 去重且保序
                     if clean_cats:
                         item["category"] = "、".join(clean_cats)
 
