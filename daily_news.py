@@ -397,7 +397,7 @@ def fetch_aihot_api(limit=30) -> list[dict]:
 def call_llm(messages):
     if not ANTHROPIC_AUTH_TOKEN:
         raise ValueError("ANTHROPIC_AUTH_TOKEN not set")
-    max_retries = 3
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             resp = requests.post(
@@ -408,9 +408,17 @@ def call_llm(messages):
             )
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            if status in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                wait = 30 * (2 ** attempt)
+                log.warning(f"LLM HTTP {status} (第{attempt+1}次)，{wait}秒后重试")
+                time.sleep(wait)
+            else:
+                raise
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             if attempt < max_retries - 1:
-                wait = 30 * (attempt + 1)
+                wait = 30 * (2 ** attempt)
                 log.warning(f"LLM 连接失败 (第{attempt+1}次)，{wait}秒后重试: {e}")
                 time.sleep(wait)
             else:
