@@ -398,31 +398,36 @@ def call_llm(messages):
     if not ANTHROPIC_AUTH_TOKEN:
         raise ValueError("ANTHROPIC_AUTH_TOKEN not set")
     max_retries = 5
+    # 使用 Session + 连接池提高跨国连接稳定性
+    session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(max_retries=3, pool_connections=1, pool_maxsize=1)
+    session.mount("https://", adapter)
     for attempt in range(max_retries):
         try:
-            resp = requests.post(
+            resp = session.post(
                 f"{LLM_BASE_URL}/chat/completions",
                 headers={"Authorization": f"Bearer {ANTHROPIC_AUTH_TOKEN}", "Content-Type": "application/json"},
                 json={"model": LLM_MODEL, "max_tokens": 16384, "messages": messages},
-                timeout=600,
+                timeout=(30, 600),  # (连接超时30秒, 读取超时600秒)
             )
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
             if status in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
-                wait = 30 * (2 ** attempt)
+                wait = 20 * (attempt + 1)  # 20/40/60/80秒，不指数增长
                 log.warning(f"LLM HTTP {status} (第{attempt+1}次)，{wait}秒后重试")
                 time.sleep(wait)
             else:
                 raise
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             if attempt < max_retries - 1:
-                wait = 30 * (2 ** attempt)
+                wait = 20 * (attempt + 1)  # 20/40/60/80秒
                 log.warning(f"LLM 连接失败 (第{attempt+1}次)，{wait}秒后重试: {e}")
                 time.sleep(wait)
             else:
                 raise
+    session.close()
 
 
 def summarize_news(raw_results):
