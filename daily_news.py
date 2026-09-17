@@ -731,8 +731,12 @@ def summarize_news(raw_results):
                     log.info(f"  排序#{_di+1}: 分{_d.get('score','')} 公司[{_co}] {_d.get('title','')[:25]}")
 
                 def _get_company(item):
-                    c = (item.get("companies", "") or "").split("、")[0].split(",")[0].strip().lower()
-                    return c
+                    # 提取所有公司（不只第一个），做同公司去重时更准确
+                    comps = (item.get("companies", "") or "")
+                    # 拆分成公司列表
+                    parts = [p.strip().lower() for p in re.split(r"[、,，;；]", comps) if p.strip()]
+                    # 合并大小写和别名归一，返回全部公司集合
+                    return tuple(parts) if parts else ("",)
 
                 def _get_track(item):
                     """从category中提取赛道"""
@@ -785,9 +789,9 @@ def summarize_news(raw_results):
                     return False
 
                 # === 阶段1：质量优先——按分数降序选 ===
-                # 同公司硬性限制：每家公司最多1条，不论分数多高
+                # 同公司硬性限制：每家公司最多1条（检查companies字段里所有公司，任一重叠即跳过）
                 final = []
-                company_count = {}
+                used_companies = set()
                 seen_tracks = set()
                 for item in all_sorted:
                     if len(final) >= 5:
@@ -798,24 +802,19 @@ def summarize_news(raw_results):
                     if _is_same_event(item, final):
                         log.info(f"  同次去重: [{item.get('title','')[:30]}]")
                         continue
-                    company = _get_company(item)
-                    cc = company_count.get(company, 0) if company else 0
-                    if cc >= 1 and company:
-                        continue  # 同公司硬性最多1条
+                    companies = _get_company(item)  # tuple of company names
+                    overlap = used_companies & set(companies)
+                    if overlap:
+                        log.info(f"  同公司去重: [{item.get('title','')[:30]}] 与已选公司重叠")
+                        continue
                     item["selected"] = True
                     final.append(item)
-                    if company:
-                        company_count[company] = cc + 1
+                    used_companies |= set(companies)
                     seen_tracks.add(_get_track(item))
-                    log.info(f"  质量入选: [{item.get('title','')}] (公司:{company}[{cc+1}], 分{item.get('score','')}, 赛道:{_get_track(item)})")
+                    log.info(f"  质量入选: [{item.get('title','')}] (公司:{companies}, 分{item.get('score','')}, 赛道:{_get_track(item)})")
 
-                # === 阶段2：放宽同公司到2条——仍按分数降序 ===
+                # === 阶段2：兜底补满（同样遵守同公司限制） ===
                 if len(final) < 5:
-                    company_count = {}
-                    for item in final:
-                        c = _get_company(item)
-                        if c:
-                            company_count[c] = company_count.get(c, 0) + 1
                     for item in all_sorted:
                         if len(final) >= 5:
                             break
@@ -823,25 +822,14 @@ def summarize_news(raw_results):
                             continue
                         if _is_dup(item):
                             continue
-                        company = _get_company(item)
-                        if company and company_count.get(company, 0) >= 2:
+                        companies = _get_company(item)
+                        overlap = used_companies & set(companies)
+                        if overlap and len(used_companies) > 0:
+                            log.info(f"  兜底同公司跳过: [{item.get('title','')[:30]}]")
                             continue
                         item["selected"] = True
                         final.append(item)
-                        if company:
-                            company_count[company] = company_count.get(company, 0) + 1
-                        seen_tracks.add(_get_track(item))
-                        log.info(f"  放宽入选: [{item.get('title','')}] (公司:{company}, 分{item.get('score','')})")
-
-                # === 阶段3：兜底补满 ===
-                if len(final) < 5:
-                    for item in all_sorted:
-                        if len(final) >= 5:
-                            break
-                        if item.get("selected"):
-                            continue
-                        item["selected"] = True
-                        final.append(item)
+                        used_companies |= set(companies)
                         log.info(f"  兜底入选: [{item.get('title','')}]")
 
                 # 重组：selected在前，其余在后
