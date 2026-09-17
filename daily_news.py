@@ -789,9 +789,9 @@ def summarize_news(raw_results):
                     return False
 
                 # === 阶段1：质量优先——按分数降序选 ===
-                # 同公司硬性限制：每家公司最多1条（检查companies字段里所有公司，任一重叠即跳过）
+                # 同公司限制：最多2条，且第2条必须≥8分（重磅）；普通重复只给1条
                 final = []
-                used_companies = set()
+                company_count = {}  # {公司: 出现次数}
                 seen_tracks = set()
                 for item in all_sorted:
                     if len(final) >= 5:
@@ -803,17 +803,29 @@ def summarize_news(raw_results):
                         log.info(f"  同次去重: [{item.get('title','')[:30]}]")
                         continue
                     companies = _get_company(item)  # tuple of company names
-                    overlap = used_companies & set(companies)
-                    if overlap:
-                        log.info(f"  同公司去重: [{item.get('title','')[:30]}] 与已选公司重叠")
+                    score = int(item.get("score", 0) or 0)
+                    # 检查该条目涉及的每个公司，是否已达上限
+                    blocked = False
+                    for c in companies:
+                        cnt = company_count.get(c, 0)
+                        # 同公司：已有1条，第2条必须≥8分；已有2条，拒绝
+                        if cnt >= 2:
+                            blocked = True
+                            break
+                        if cnt >= 1 and score < 8:
+                            blocked = True
+                            break
+                    if blocked:
+                        log.info(f"  同公司限制: [{item.get('title','')[:30]}] (分{score}, 公司{companies})")
                         continue
                     item["selected"] = True
                     final.append(item)
-                    used_companies |= set(companies)
+                    for c in companies:
+                        company_count[c] = company_count.get(c, 0) + 1
                     seen_tracks.add(_get_track(item))
-                    log.info(f"  质量入选: [{item.get('title','')}] (公司:{companies}, 分{item.get('score','')}, 赛道:{_get_track(item)})")
+                    log.info(f"  质量入选: [{item.get('title','')}] (公司:{companies}, 分{score}, 赛道:{_get_track(item)})")
 
-                # === 阶段2：兜底补满（同样遵守同公司限制） ===
+                # === 阶段2：兜底补满（普通事件，同公司尽量不重复） ===
                 if len(final) < 5:
                     for item in all_sorted:
                         if len(final) >= 5:
@@ -823,14 +835,16 @@ def summarize_news(raw_results):
                         if _is_dup(item):
                             continue
                         companies = _get_company(item)
-                        overlap = used_companies & set(companies)
-                        if overlap and len(used_companies) > 0:
-                            log.info(f"  兜底同公司跳过: [{item.get('title','')[:30]}]")
+                        score = int(item.get("score", 0) or 0)
+                        # 兜底阶段：同公司已有1条就尽量跳过（除非实在没得选）
+                        overlap_any = any(company_count.get(c, 0) >= 1 for c in companies)
+                        if overlap_any:
                             continue
                         item["selected"] = True
                         final.append(item)
-                        used_companies |= set(companies)
-                        log.info(f"  兜底入选: [{item.get('title','')}]")
+                        for c in companies:
+                            company_count[c] = company_count.get(c, 0) + 1
+                        log.info(f"  兜底入选: [{item.get('title','')}] (分{score})")
 
                 # 重组：selected在前，其余在后
                 rest = [it for it in all_sorted if not it.get("selected")]
