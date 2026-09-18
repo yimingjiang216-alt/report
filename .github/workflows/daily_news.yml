@@ -41,7 +41,7 @@ jobs:
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
           FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          RSSHUB_URL: https://rsshub.app
+          RSSHUB_URL: https://rsshub.rssforever.com
         run: python daily_news.py
 
       - name: Upload artifacts
