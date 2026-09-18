@@ -1,5 +1,10 @@
 {
   "titles": [
+    "OpenAI发布模型错位披露框架与六份案例报告",
+    "英伟达黄仁勋称公司2027年芯片销量将翻倍",
+    "Agility Robotics展示Digit人形机器人十年发展历程",
+    "Emesent与Trimble合作实现激光雷达数据无缝对接",
+    "Anthropic用Claude优化开源生物分子模型平均提速四倍",
     "西门子工业软件平台在南京工厂成功部署人形机器人",
     "英伟达Vera Rubin NVL72系统MLPerf推理性能领先",
     "曼彻斯特大学使用英伟达地球二号平台预测英国空气质量",
@@ -9,12 +14,7 @@
     "英伟达与合作伙伴发布新AI芯片平台能效成果",
     "谷歌发布实时语音对话模型Gemini 3.8 Live系列",
     "生数科技发布Vidu S2双模型及空间视频方案",
-    "初创公司Fyxer基于OpenAI模型构建可信AI助理",
-    "Cognition团队用Devin智能体完成RSA-260因式分解刷新",
-    "DeepSeek发布V4.1-Flash新架构模型原生视觉KV缓存降至",
-    "OpenAI发布Agents API公测版将Codex基础设施开放给开",
-    "Cursor发布Projects功能用协调者智能体调度数千子智能体并行",
-    "虎嗅深度解读黄仁勋战略野心从芯片延伸至电力和开发者生态"
+    "初创公司Fyxer基于OpenAI模型构建可信AI助理"
   ],
-  "date": "2026年09月17日"
+  "date": "2026年09月18日"
 }
