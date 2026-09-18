@@ -822,8 +822,10 @@ def summarize_news(raw_results):
 
                 # === 阶段1：质量优先——按分数降序选 ===
                 # 同公司限制：最多2条，且第2条必须≥8分（重磅）；普通重复只给1条
+                # URL 去重：同一链接最多1条（防止合集拆分出的子新闻共用URL）
                 final = []
                 company_count = {}  # {公司: 出现次数}
+                used_urls = set()   # 已选URL，防止重复链接
                 seen_tracks = set()
                 for item in all_sorted:
                     if len(final) >= 5:
@@ -833,6 +835,11 @@ def summarize_news(raw_results):
                         continue
                     if _is_same_event(item, final):
                         log.info(f"  同次去重: [{item.get('title','')[:30]}]")
+                        continue
+                    # URL去重：合集拆分出的子新闻共用同一URL，只取最高分那条
+                    item_url = (item.get("source_url", "") or "").strip()
+                    if item_url and item_url in used_urls:
+                        log.info(f"  URL重复跳过: [{item.get('title','')[:30]}] (链接已选)")
                         continue
                     companies = _get_company(item)  # tuple of company names
                     score = int(item.get("score", 0) or 0)
@@ -854,10 +861,12 @@ def summarize_news(raw_results):
                     final.append(item)
                     for c in companies:
                         company_count[c] = company_count.get(c, 0) + 1
+                    if item_url:
+                        used_urls.add(item_url)
                     seen_tracks.add(_get_track(item))
                     log.info(f"  质量入选: [{item.get('title','')}] (公司:{companies}, 分{score}, 赛道:{_get_track(item)})")
 
-                # === 阶段2：兜底补满（普通事件，同公司尽量不重复） ===
+                # === 阶段2：兜底补满（普通事件，同公司尽量不重复，URL不重复） ===
                 if len(final) < 5:
                     for item in all_sorted:
                         if len(final) >= 5:
@@ -865,6 +874,10 @@ def summarize_news(raw_results):
                         if item.get("selected"):
                             continue
                         if _is_dup(item):
+                            continue
+                        # URL去重
+                        item_url = (item.get("source_url", "") or "").strip()
+                        if item_url and item_url in used_urls:
                             continue
                         companies = _get_company(item)
                         score = int(item.get("score", 0) or 0)
@@ -876,6 +889,8 @@ def summarize_news(raw_results):
                         final.append(item)
                         for c in companies:
                             company_count[c] = company_count.get(c, 0) + 1
+                        if item_url:
+                            used_urls.add(item_url)
                         log.info(f"  兜底入选: [{item.get('title','')}] (分{score})")
 
                 # 重组：selected在前，其余在后
