@@ -63,7 +63,7 @@ RSS_SOURCES = [
     ("雷峰网",               "https://www.leiphone.com/feed",                                          3),
     ("华尔街见闻",           "https://wallstreetcn.com/rss",                                           4),
     ("财新科技",             "https://weekly.caixin.com/rss/index.xml",                                4),
-    ("新浪科技",             "https://feed.sina.com.cn/api/roll/get?pageid=153&lid=2509&k=&num=50&page=1&r=&encode=utf-8&callback=feedCallback", 3),
+    ("新浪科技",             "https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2509&k=&num=50&page=1", 3),
     ("腾讯科技",             "https://tech.qq.com/rss/tech.xml",                                       3),
     ("DeepTech深科技",       "https://www.mittrchina.com/rss",                                         4),
     ("TechCrunch AI",        "https://techcrunch.com/category/artificial-intelligence/feed/",          4),
@@ -161,6 +161,11 @@ def _fetch_rss(source_name, rss_url, max_items):
     try:
         resp = requests.get(rss_url, headers=_HTTP_HEADERS, timeout=15)
         resp.raise_for_status()
+        text = resp.text
+        # 新浪等接口返回JSON而非RSS，检测"{"开头
+        stripped = text.strip()
+        if stripped.startswith("{"):
+            return _fetch_rss_json(source_name, stripped, max_items)
         root = ET.fromstring(resp.content)
         results = []
         for item in root.findall(".//item")[:max_items]:
@@ -179,6 +184,36 @@ def _fetch_rss(source_name, rss_url, max_items):
         return results
     except Exception as e:
         log.warning(f"RSS fetch failed [{source_name}]: {e}")
+        return []
+
+
+def _fetch_rss_json(source_name, json_text, max_items):
+    """解析新浪科技等返回JSON的接口"""
+    try:
+        import json as _json
+        data = _json.loads(json_text)
+        # 新浪: result.data[]，每条含 title/url/intro/ctime/media_name
+        items = data.get("result", {}).get("data", []) if isinstance(data, dict) else []
+        results = []
+        for it in items[:max_items]:
+            title = (it.get("title") or it.get("stitle") or "").strip()
+            link  = (it.get("url") or "").strip()
+            summary = (it.get("intro") or it.get("summary") or "").strip()
+            ctime = it.get("ctime") or it.get("intime") or ""
+            author = (it.get("media_name") or it.get("author") or "").strip()
+            if not title or not link:
+                continue
+            # 时间戳转可读
+            pub_readable = ""
+            try:
+                pub_readable = datetime.fromtimestamp(int(ctime)).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                pub_readable = str(ctime)[:16]
+            results.append({"title": title, "url": link, "rss_summary": summary[:300],
+                             "content": "", "pub": pub_readable, "source": source_name, "author": author})
+        return results
+    except Exception as e:
+        log.warning(f"JSON feed failed [{source_name}]: {e}")
         return []
 
 
