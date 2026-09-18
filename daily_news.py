@@ -316,6 +316,37 @@ def search_news():
         if i < len(candidates) - 1:
             time.sleep(JINA_DELAY_SEC)
 
+    # ── 合集拆分：检测正文含多个"## "小标题的文章，拆成独立素材 ──
+    split_articles = []
+    for art in candidates:
+        content = art.get("content", "")
+        # 检测合集特征：正文里出现2个以上的 markdown 二级标题（## ）
+        headings = re.findall(r"(?:^|\n)\s*#{1,3}\s+([^\n]{5,60})", content)
+        # 也检测"■"或数字编号开头的分段（极客公园汇总常用）
+        if len(headings) >= 2:
+            log.info(f"  检测到合集: [{art['title'][:30]}] 含{len(headings)}个小标题，拆分...")
+            # 按标题切分正文
+            parts = re.split(r"(?:^|\n)\s*#{1,3}\s+[^\n]{5,60}\n", content)
+            # parts[0]通常是导语，剩余每段对应一个子新闻
+            for idx, part in enumerate(parts[1:], 1):
+                if len(part.strip()) < 40:
+                    continue
+                sub_title = headings[idx-1] if idx-1 < len(headings) else f"{art['title']}片段{idx}"
+                sub = dict(art)
+                sub["title"] = sub_title
+                sub["content"] = part.strip()[:JINA_MAX_CHARS]
+                sub["rss_summary"] = part.strip()[:300]
+                sub["_from_digest"] = True
+                split_articles.append(sub)
+                log.info(f"    拆分出: {sub_title[:40]}")
+        else:
+            split_articles.append(art)
+
+    # 用拆分后的列表替换
+    if split_articles:
+        candidates = split_articles
+        log.info(f"合集拆分后共 {len(candidates)} 条素材")
+
     # 返回(送LLM的30条, 全量原始清单)
     return candidates, all_articles
 
