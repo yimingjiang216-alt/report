@@ -719,6 +719,9 @@ def summarize_news(raw_results):
                     clean_cats = list(dict.fromkeys(p.strip().replace(" ","") for p in parts if p.strip().replace(" ","") in VALID_CATS))  # 去重且保序
                     if clean_cats:
                         item["category"] = "、".join(clean_cats)
+                    else:
+                        # 白名单一个都不匹配（LLM给了自创标签或空）→ 给默认值，避免飞书显示【】或【非法标签】
+                        item["category"] = "其他"
 
                     # 联网核查移到组稿之后（只对最终selected的5条做）
 
@@ -1184,8 +1187,8 @@ def send_feishu(news_items, report_date):
     # 构建富文本内容
     content_lines = []
     for i, item in enumerate(items, 1):
-        cat = item.get("category", "")
-        title = item.get("title", "")
+        cat = item.get("category", "") or "其他"
+        title = item.get("title", "") or "（无标题）"
         summary = item.get("summary", "")
         url = item.get("source_url", "")
 
@@ -1441,13 +1444,12 @@ def main():
     log.info("【Step 7】推送飞书...")
     send_feishu(news_items, report_date)
 
-    # ── 保存本期+前两期标题，供跨期去重（保留最近3期=15条） ──
+    # ── 保存本期标题，供跨期去重（保留最近3期=15条） ──
     try:
         selected_items = [item for item in news_items if item.get("selected") is True]
-        final_5 = selected_items[:5] if len(selected_items) >= 5 else news_items[:5]
-        # 过滤掉兜底内容（title是"科技前沿简报"的占位条目，不是真新闻，不能进去重库）
-        valid_final = [it for it in final_5 if it.get("title", "") != "科技前沿简报" and it.get("score", 0) > 0]
-        new_titles = [item.get("title", "") for item in valid_final]
+        # 只用真正选中的条目；没选中就空列表，绝不拿未选中的凑数进去重库
+        valid_final = [it for it in selected_items if it.get("title", "") != "科技前沿简报" and it.get("score", 0) > 0]
+        new_titles = [item.get("title", "") for item in valid_final[:5]]
         last_sent_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_sent.json")
         # 读取旧标题，合并保留最近3期
         old_titles = []
