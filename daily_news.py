@@ -877,20 +877,23 @@ def summarize_news(raw_results):
                     log.info(f"  质量入选: [{item.get('title','')}] (公司:{companies}, 分{score}, 赛道:{_get_track(item)})")
 
                 # === 阶段2：兜底补满（普通事件，同公司尽量不重复，URL不重复） ===
+                # 凑不满5条时，放宽跨期去重：允许≥6分的高分旧闻（昨天发过但有持续重要性）补位
                 if len(final) < 5:
                     for item in all_sorted:
                         if len(final) >= 5:
                             break
                         if item.get("selected"):
                             continue
-                        if _is_dup(item):
+                        score = int(item.get("score", 0) or 0)
+                        is_dup = _is_dup(item)
+                        # 放宽逻辑：跨期重复但分数≥6的，允许进入补位（重要旧闻不丢）
+                        if is_dup and score < 6:
                             continue
                         # URL去重
                         item_url = (item.get("source_url", "") or "").strip()
                         if item_url and item_url in used_urls:
                             continue
                         companies = _get_company(item)
-                        score = int(item.get("score", 0) or 0)
                         # 兜底阶段：同公司已有1条就尽量跳过（除非实在没得选）
                         overlap_any = any(company_count.get(c, 0) >= 1 for c in companies)
                         if overlap_any:
@@ -901,7 +904,26 @@ def summarize_news(raw_results):
                             company_count[c] = company_count.get(c, 0) + 1
                         if item_url:
                             used_urls.add(item_url)
-                        log.info(f"  兜底入选: [{item.get('title','')}] (分{score})")
+                        mark = "放宽旧闻" if is_dup else "兜底"
+                        log.info(f"  {mark}入选: [{item.get('title','')[:30]}] (分{score})")
+
+                # === 阶段3：终极兜底（阶段2仍凑不满，放掉跨期+同公司限制，只保URL不重复） ===
+                if len(final) < 5:
+                    log.info(f"  阶段2后仍缺 {5 - len(final)} 条，进入终极兜底...")
+                    for item in all_sorted:
+                        if len(final) >= 5:
+                            break
+                        if item.get("selected"):
+                            continue
+                        # 只保URL不重复，放掉跨期和同公司限制
+                        item_url = (item.get("source_url", "") or "").strip()
+                        if item_url and item_url in used_urls:
+                            continue
+                        if item_url:
+                            used_urls.add(item_url)
+                        item["selected"] = True
+                        final.append(item)
+                        log.info(f"  终极兜底: [{item.get('title','')[:30]}] (分{item.get('score','?')})")
 
                 # 重组：selected在前，其余在后
                 rest = [it for it in all_sorted if not it.get("selected")]
