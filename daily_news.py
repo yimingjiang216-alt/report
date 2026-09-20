@@ -157,6 +157,22 @@ _HTTP_HEADERS = {
 
 # ── 1. Fetch ──────────────────────────────────────────────────────────────────
 
+def _is_digest_title(title):
+    """判断标题是否是"资讯汇总"条目（如极客公园"极客早知道"、36氪快讯汇总）。
+
+    特征（已用真实 feed 验证）：标题超长(>50字) 且含 ≥2 个新闻分隔符（；;｜|）。
+    这类条目是一篇包含多条新闻的合集，不能当单一新闻送 LLM，直接跳过。
+    独立文章标题短(通常<35字)且分隔符数为0，不受影响。
+    """
+    if not title:
+        return False
+    seps = title.count("；") + title.count(";") + title.count("｜") + title.count("|")
+    # 也统计顿号密集（多个"、"可能也是并列新闻），但顿号在正常标题常见，仅作为辅助
+    if len(title) > 50 and seps >= 2:
+        return True
+    return False
+
+
 def _fetch_rss(source_name, rss_url, max_items):
     try:
         resp = requests.get(rss_url, headers=_HTTP_HEADERS, timeout=15)
@@ -170,6 +186,9 @@ def _fetch_rss(source_name, rss_url, max_items):
         results = []
         for item in root.findall(".//item")[:max_items]:
             title   = (item.findtext("title") or "").strip()
+            # 资讯汇总条目（极客早知道等）直接跳过，不作为单条新闻
+            if _is_digest_title(title):
+                continue
             # link 可能是 <link>文本</link> 或 <link href="url"/>（Atom格式）
             link    = (item.findtext("link") or "").strip()
             if not link:
@@ -357,36 +376,7 @@ def search_news():
         if i < len(candidates) - 1:
             time.sleep(JINA_DELAY_SEC)
 
-    # ── 合集拆分：检测正文含多个"## "小标题的文章，拆成独立素材 ──
-    split_articles = []
-    for art in candidates:
-        content = art.get("content", "")
-        # 检测合集特征：正文里出现2个以上的 markdown 二级标题（## ）
-        headings = re.findall(r"(?:^|\n)\s*#{1,3}\s+([^\n]{5,60})", content)
-        # 也检测"■"或数字编号开头的分段（极客公园汇总常用）
-        if len(headings) >= 2:
-            log.info(f"  检测到合集: [{art['title'][:30]}] 含{len(headings)}个小标题，拆分...")
-            # 按标题切分正文
-            parts = re.split(r"(?:^|\n)\s*#{1,3}\s+[^\n]{5,60}\n", content)
-            # parts[0]通常是导语，剩余每段对应一个子新闻
-            for idx, part in enumerate(parts[1:], 1):
-                if len(part.strip()) < 40:
-                    continue
-                sub_title = headings[idx-1] if idx-1 < len(headings) else f"{art['title']}片段{idx}"
-                sub = dict(art)
-                sub["title"] = sub_title
-                sub["content"] = part.strip()[:JINA_MAX_CHARS]
-                sub["rss_summary"] = part.strip()[:300]
-                sub["_from_digest"] = True
-                split_articles.append(sub)
-                log.info(f"    拆分出: {sub_title[:40]}")
-        else:
-            split_articles.append(art)
-
-    # 用拆分后的列表替换
-    if split_articles:
-        candidates = split_articles
-        log.info(f"合集拆分后共 {len(candidates)} 条素材")
+    # 合集已在 _fetch_rss 入口用 _is_digest_title 过滤，无需在此拆分正文
 
     # 返回(送LLM的30条, 全量原始清单)
     return candidates, all_articles
