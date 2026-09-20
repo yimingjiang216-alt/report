@@ -884,6 +884,9 @@ def summarize_news(raw_results):
                             break
                         if item.get("selected"):
                             continue
+                        if _is_same_event(item, final):
+                            log.info(f"  同次去重: [{item.get('title','')[:30]}]")
+                            continue
                         score = int(item.get("score", 0) or 0)
                         is_dup = _is_dup(item)
                         # 放宽逻辑：跨期重复但分数≥6的，允许进入补位（重要旧闻不丢）
@@ -914,6 +917,10 @@ def summarize_news(raw_results):
                         if len(final) >= 5:
                             break
                         if item.get("selected"):
+                            continue
+                        # 至少不做同次去重（避免同一次简报出现两条相似内容）
+                        if _is_same_event(item, final):
+                            log.info(f"  终极兜底同次skip: [{item.get('title','')[:30]}]")
                             continue
                         # 只保URL不重复，放掉跨期和同公司限制
                         item_url = (item.get("source_url", "") or "").strip()
