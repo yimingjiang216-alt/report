@@ -931,25 +931,9 @@ def summarize_news(raw_results):
                     if not item.get("selected"):
                         continue
 
-                    # 标题：超过22字截断，且必须在合理边界（标点/空格），避免截出半截词
-                    title = item.get("title", "")
-                    if len(title) > 22:
-                        cut = title[:22]
-                        # 优先在标点处截断
-                        best = -1
-                        for ch in ["，", "、", "：", "。", "；", " ", "　", "-", "/"]:
-                            pos = cut.rfind(ch)
-                            if pos > best:
-                                best = pos
-                        if best >= 14:  # 至少保留了足够信息量才在标点截断
-                            cut = cut[:best]
-                        # 否则直接硬截22字（保证不超宽）
-                        else:
-                            cut = cut[:22]
-                        # 去掉可能遗留的尾部标点
-                        cut = cut.rstrip("，、：。； -/")
-                        item["title"] = cut
-                        log.info(f"  标题截断: {title[:40]}... → {item['title']}")
+                    # 标题：不再截断。飞书 post 消息的 text 元素超长会自动换行，
+                    # 之前 22字截断反而产生半截词（中英混排时砍断英文单词）。
+                    # 标题保持完整，靠飞书自动换行。
 
                     # 摘要：保证完整句子，上限180字（A4一页5条放得下）
                     summary = item.get("summary", "")
