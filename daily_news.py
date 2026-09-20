@@ -990,18 +990,18 @@ def summarize_news(raw_results):
                     if not item.get("selected"):
                         continue
 
-                    # 标题：超过35字时在最后一个逗号前截断（保持语义完整）
+                    # 标题：超过22字强制截断（飞书显示上限，超过会截断出半截字）
                     title = item.get("title", "")
-                    if len(title) > 35:
-                        # 在最后一个逗号/顿号处截断
-                        cut = title[:35]
-                        for ch in ["，", "、", "："]:
+                    if len(title) > 22:
+                        # 在最后一个逗号/顿号/空格处截断，保持语义完整
+                        cut = title[:22]
+                        for ch in ["，", "、", "：", " ", "　"]:
                             pos = cut.rfind(ch)
                             if 15 <= pos:
                                 cut = cut[:pos]
                                 break
                         item["title"] = cut
-                        log.info(f"  标题截断: {title[:45]}... → {item['title']}")
+                        log.info(f"  标题截断: {title[:40]}... → {item['title']}")
 
                     # 摘要：保证完整句子，上限180字（A4一页5条放得下）
                     summary = item.get("summary", "")
