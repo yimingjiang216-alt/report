@@ -699,6 +699,7 @@ def summarize_news(raw_results):
                     for k in range(len(t) - 1):
                         llm_bigrams_all.add(t[k:k+2])
 
+                # 二次补充打分机制已废弃（会引入旧闻和垃圾新闻），改为不启用
                 missed_materials = []
                 for idx, r in enumerate(raw_results):
                     si = str(idx + 1)
@@ -716,7 +717,7 @@ def summarize_news(raw_results):
                         continue
                     missed_materials.append((si, r))
 
-                if missed_materials:
+                if False and missed_materials:  # 二次补充打分已废弃，防止引入旧闻/垃圾
                     log.info(f"  发现 {len(missed_materials)} 条LLM遗漏的非OpenAI素材，二次补充打分...")
                     missed_text = "\n\n".join(
                         f"[{si}] 来源:{r.get('source','')}\n标题:{r['title']}\n正文:\n{(r.get('content') or r.get('rss_summary',''))[:1500]}"
