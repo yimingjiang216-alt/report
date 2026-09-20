@@ -170,7 +170,13 @@ def _fetch_rss(source_name, rss_url, max_items):
         results = []
         for item in root.findall(".//item")[:max_items]:
             title   = (item.findtext("title") or "").strip()
-            link    = (item.findtext("link")  or "").strip()
+            # link 可能是 <link>文本</link> 或 <link href="url"/>（Atom格式）
+            link    = (item.findtext("link") or "").strip()
+            if not link:
+                # Atom回退：取 link 元素的 href 属性
+                le = item.find("link")
+                if le is not None:
+                    link = (le.get("href") or "").strip()
             pub_str = (item.findtext("pubDate") or "").strip()
             desc    = re.sub(r"<[^>]+>", "", item.findtext("description") or "").strip()
             if not title or not link:
@@ -567,7 +573,7 @@ def summarize_news(raw_results):
 5. sentiment: 正面/负面/中性
 6. cluster_tag: 厂商动态类/技术突破类/行业趋势类/产品评测类/市场情绪类
 7. companies: 涉及的公司/产品名称（重要！代码用此字段做同公司去重，务必准确填写主要公司名）
-8. source_index: 原始素材编号（合并时选最详细那条）
+8. source_index: 原始素材编号（**极其重要**，必须是上方素材清单里 [数字] 的那个编号，用于回填原文链接。每条必须准确对应其素材编号，写错会导致链接指向错误文章。合并多条时填最详细那条的编号）
 9. source_url: 留空，代码自动回填
 10. source_name: 来源媒体名
 11. author: 作者，无则留空
@@ -666,14 +672,25 @@ def summarize_news(raw_results):
                     if idx in url_index and url_index[idx]:
                         item["source_url"] = url_index[idx]
                     else:
-                        # source_index查不到，用标题前10字模糊匹配原始素材
-                        llm_title = re.sub(r"\s+", "", item.get("title", ""))[:10]
-                        if llm_title:
-                            for r in raw_results:
-                                raw_title = re.sub(r"\s+", "", r.get("title", ""))
-                                if llm_title in raw_title and r.get("url"):
-                                    item["source_url"] = r["url"]
-                                    break
+                        # source_index查不到，用标题全文bigram相似度匹配（不配置错的URL）
+                        item_title_full = re.sub(r"\s+", "", item.get("title", "")).lower()
+                        item_bgs = set(item_title_full[k:k+2] for k in range(len(item_title_full)-1)) if len(item_title_full) > 2 else set()
+                        best_url, best_ratio = "", 0.0
+                        for r in raw_results:
+                            raw_title = re.sub(r"\s+", "", r.get("title", "")).lower()
+                            if not raw_title or not r.get("url"):
+                                continue
+                            raw_bgs = set(raw_title[k:k+2] for k in range(len(raw_title)-1))
+                            if not item_bgs or not raw_bgs:
+                                continue
+                            overlap = len(item_bgs & raw_bgs)
+                            ratio = overlap / min(len(item_bgs), len(raw_bgs)) if min(len(item_bgs), len(raw_bgs)) else 0
+                            if ratio > best_ratio:
+                                best_ratio = ratio
+                                best_url = r.get("url")
+                        if best_url and best_ratio > 0.5:
+                            item["source_url"] = best_url
+                        # 相似度不足就保持空，后续在出口检查还有一层兜底
                     # ── 标签白名单过滤（只保留合法标签，去掉LLM自创的） ──
                     VALID_CATS = {"AI大模型","算力芯片","具身机器人","无人机","新型储能","技术突破","产业动态"}
                     cat = item.get("category","")
@@ -954,19 +971,30 @@ def summarize_news(raw_results):
                             item["source_url"] = url_index[idx]
                             url = item["source_url"]
                         else:
-                            # 标题模糊匹配原始素材URL
-                            item_title = re.sub(r"\s+", "", item.get("title", ""))[:10]
+                            # source_index查不到，用标题全文做bigram相似度匹配（而非前10字子串，避免配错）
+                            item_title_full = re.sub(r"\s+", "", item.get("title", "")).lower()
+                            item_bgs = set(item_title_full[k:k+2] for k in range(len(item_title_full)-1)) if len(item_title_full) > 2 else set()
+                            best_match, best_ratio = None, 0.0
                             for ri, r in enumerate(raw_results):
-                                raw_t = re.sub(r"\s+", "", r.get("title", ""))[:10]
-                                if item_title and raw_t and item_title in raw_t or raw_t in item_title:
-                                    if r.get("url"):
-                                        item["source_url"] = r["url"]
-                                        url = r["url"]
-                                        item["source_index"] = str(ri + 1)
-                                        log.info(f"  URL模糊匹配: [{item.get('title','')}] → {url[:50]}")
-                                        break
+                                raw_t = re.sub(r"\s+", "", r.get("title", "")).lower()
+                                if not raw_t or not r.get("url"):
+                                    continue
+                                raw_bgs = set(raw_t[k:k+2] for k in range(len(raw_t)-1))
+                                if not item_bgs or not raw_bgs:
+                                    continue
+                                overlap = len(item_bgs & raw_bgs)
+                                ratio = overlap / min(len(item_bgs), len(raw_bgs)) if min(len(item_bgs), len(raw_bgs)) else 0
+                                if ratio > best_ratio:
+                                    best_ratio = ratio
+                                    best_match = (r.get("url"), ri)
+                            # 只有相似度足够高（>0.5）才配，否则宁可缺失也不配错
+                            if best_match and best_ratio > 0.5:
+                                item["source_url"] = best_match[0]
+                                url = best_match[0]
+                                item["source_index"] = str(best_match[1] + 1)
+                                log.info(f"  URL相似度匹配: [{item.get('title','')}] → {url[:50]} ({best_ratio:.2f})")
                             else:
-                                log.warning(f"  URL缺失: [{item.get('title','')}]")
+                                log.warning(f"  URL缺失(相似度不足{best_ratio:.2f}): [{item.get('title','')}]")
                     if url in seen_urls:
                         log.warning(f"  URL重复: [{item.get('title','')}] → {url[:50]}")
                     seen_urls.add(url)
