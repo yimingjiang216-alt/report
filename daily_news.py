@@ -727,11 +727,13 @@ def summarize_news(raw_results):
 规则：
 - title 严格18-22字以内（绝对不能超过22字！），直接说事，包含核心主语和关键事实。专有名词必须写完整，不得缩写（如"特斯拉"不得写成"特斯"）
 - summary 130-170字，说清事件、关键数据/背景、产业影响，每句以句号结尾
-- score 1-10分
-- 必须加权≥8分：技术里程碑/首次实现某能力/头部公司新产品/千亿级投资并购/重大IPO/安全事故
+- score 1-10分，宁低勿高
+- 必须加权≥8分：技术里程碑/首次实现某能力/头部公司新产品/千亿级投资并购/重大IPO/安全事故/中央级重磅政策
 - 降权：媒体解读文降2-3分，快报降权
+- **与五大赛道无关的新闻（航运/海运/建材/天气/体育/娱乐等）→ 0-2分，绝不入选**
+- **赛道必须准确，严禁把无关行业标成无人机/机器人/芯片等赛道**
 - companies 填涉及的主要公司名（不是来源媒体名）
-- category 两层标签(赛道、性质)，仅限：AI大模型/算力芯片/具身机器人/无人机/新型储能 + 技术突破/产业动态
+- category 两层标签(赛道、性质)，仅限：AI大模型/算力芯片/具身机器人/无人机/新型储能 + 技术突破/产业动态。无关行业直接给低分，不硬套赛道
 - source_url 留空，selected 全部false
 - 字段值不得含英文双引号
 
@@ -756,6 +758,16 @@ def summarize_news(raw_results):
                                 pidx = str(pi.get("source_index", ""))
                                 if pidx in url_index and url_index[pidx]:
                                     pi["source_url"] = url_index[pidx]
+                                else:
+                                    # source_index 查不到就标题模糊匹配 URL
+                                    pt = re.sub(r"\s+", "", pi.get("title", ""))[:12]
+                                    for mi, mr in missed_materials:
+                                        mrt = re.sub(r"\s+", "", mr.get("title", ""))
+                                        if pt and mrt and (pt in mrt or mrt in pt):
+                                            if mr.get("url"):
+                                                pi["source_url"] = mr["url"]
+                                                pi["source_index"] = mi
+                                                break
                                 pi["selected"] = False
                                 pi["score"] = int(pi.get("score", 0))  # 确保分数为整数
                                 parsed.append(pi)
