@@ -171,20 +171,32 @@ def _fetch_rss(source_name, rss_url, max_items):
             return _fetch_rss_json(source_name, stripped, max_items)
         root = ET.fromstring(resp.content)
         results = []
-        for item in root.findall(".//item")[:max_items]:
-            title   = (item.findtext("title") or "").strip()
+        # 兼容 RSS(<item>) 和 Atom(<entry>)，忽略命名空间（Atom 带 xmlns，直接用 tag 名匹配不到）
+        def _localname(tag):
+            return tag.split("}")[-1] if "}" in tag else tag
+        all_entries = [e for e in root.iter() if _localname(e.tag) in ("item", "entry")]
+        for item in all_entries[:max_items]:
+            # 每个子元素按 local-name 取值（Atom/RSS 字段名不同）
+            def _get(name):
+                for child in item:
+                    if _localname(child.tag) == name:
+                        return (child.text or "").strip()
+                return ""
+            title = _get("title")
             # 资讯汇总条目（极客早知道等）直接跳过，不作为单条新闻
             if _is_digest_title(title):
                 continue
-            # link 可能是 <link>文本</link> 或 <link href="url"/>（Atom格式）
-            link    = (item.findtext("link") or "").strip()
+            link = _get("link")
             if not link:
-                # Atom回退：取 link 元素的 href 属性
-                le = item.find("link")
-                if le is not None:
-                    link = (le.get("href") or "").strip()
-            pub_str = (item.findtext("pubDate") or "").strip()
-            desc    = re.sub(r"<[^>]+>", "", item.findtext("description") or "").strip()
+                # link 可能是 <link href="url"/>（Atom 用 href 属性，且可能在摘要里）
+                for child in item:
+                    if _localname(child.tag) == "link":
+                        link = (child.get("href") or "").strip()
+                        if link:
+                            break
+            pub_str = _get("pubDate") or _get("published") or _get("updated")
+            desc = _get("description") or _get("summary") or _get("content")
+            desc = re.sub(r"<[^>]+>", "", desc)
             if not title or not link:
                 continue
             try:
