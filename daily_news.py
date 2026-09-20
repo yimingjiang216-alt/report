@@ -1464,6 +1464,9 @@ def main():
         fresh_results.append(item)
     log.info(f"过滤旧文章: {len(raw_results)} → {len(fresh_results)} 篇（丢弃{dropped_old}条过期、{dropped_unknown}条无时间）")
     raw_results = fresh_results
+    if not raw_results:
+        log.error("过滤后无有效素材（所有文章时间缺失或过期），退出")
+        sys.exit(1)
 
     # ── 保存精选素材清单到 dp3 文件夹，方便溯源 ──
     try:
@@ -1514,28 +1517,21 @@ def main():
         # 过滤掉兜底内容（title是"科技前沿简报"的占位条目，不是真新闻，不能进去重库）
         valid_final = [it for it in final_5 if it.get("title", "") != "科技前沿简报" and it.get("score", 0) > 0]
         new_titles = [item.get("title", "") for item in valid_final]
-        # 同时记录每条的 companies，供公司级去重兜底
-        new_events = [{"title": it.get("title",""), "companies": it.get("companies",""), "category": it.get("category","")} for it in valid_final]
         last_sent_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_sent.json")
         # 读取旧标题，合并保留最近3期
         old_titles = []
-        old_events = []
         try:
             if os.path.exists(last_sent_path):
                 with open(last_sent_path, encoding="utf-8") as f:
                     old_data = json.load(f)
                 old_titles = old_data.get("titles", [])
-                old_events = old_data.get("events", [])
         except Exception:
             pass
         # 新标题在前，旧标题在后，最多保留15条（3期×5条，每天跑需要覆盖更长去重窗口）
         all_titles = new_titles + [t for t in old_titles if t not in new_titles]
         all_titles = all_titles[:15]
-        # events 同样合并，与 titles 对齐（保留最多15条）
-        all_events = new_events + [e for e in old_events if e.get("title","") not in new_titles]
-        all_events = all_events[:15]
         with open(last_sent_path, "w", encoding="utf-8") as f:
-            json.dump({"titles": all_titles, "events": all_events, "date": report_date}, f, ensure_ascii=False, indent=2)
+            json.dump({"titles": all_titles, "date": report_date}, f, ensure_ascii=False, indent=2)
         log.info(f"✅ 已保存去重库到 last_sent.json（{len(all_titles)} 条，含上期）")
     except Exception as e:
         log.warning(f"保存 last_sent.json 失败: {e}")
