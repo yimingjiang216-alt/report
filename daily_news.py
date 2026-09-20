@@ -49,23 +49,16 @@ RSS_SOURCES = [
     ("Y Combinator",         "https://www.ycombinator.com/blog/rss",                                   4),
     ("量子位",               "https://www.qbitai.com/feed",                                            5),
     ("极客公园",             "https://www.geekpark.net/rss",                                           5),
-    ("机器之心",             "https://jiqizhixin.com/rss",                                             5),
     ("虎嗅",                 f"{RSSHUB_URL}/huxiu/article",                                           5),
     ("晚点LatePost",         "https://feeds.feedburner.com/latepost",                                  5),
     ("36氪",                 "https://36kr.com/feed",                                                  4),
-    ("36氪快讯",             "https://36kr.com/newsflashes/rss",                                       4),
     ("少数派",               "https://sspai.com/feed",                                                 4),
     ("InfoQ",                "https://www.infoq.cn/feed",                                              4),
-    ("澎湃科技",             "https://www.thepaper.cn/rss_list.jsp?cat=104828",                        4),
     ("AI科技大本营",         "https://blog.csdn.net/dQCFKyQDXYm3F8rB0/rss/list",                      3),
     ("钛媒体",               "https://www.tmtpost.com/rss",                                            4),
     ("爱范儿",               "https://www.ifanr.com/feed",                                             3),
     ("雷峰网",               "https://www.leiphone.com/feed",                                          3),
-    ("华尔街见闻",           "https://wallstreetcn.com/rss",                                           4),
-    ("财新科技",             "https://weekly.caixin.com/rss/index.xml",                                4),
     ("新浪科技",             "https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2509&k=&num=50&page=1", 3),
-    ("腾讯科技",             "https://tech.qq.com/rss/tech.xml",                                       3),
-    ("DeepTech深科技",       "https://www.mittrchina.com/rss",                                         4),
     ("TechCrunch AI",        "https://techcrunch.com/category/artificial-intelligence/feed/",          4),
     ("VentureBeat",          "https://venturebeat.com/feed/",                                          4),
     ("MIT Tech Review",      "https://www.technologyreview.com/feed/",                                 4),
@@ -78,30 +71,24 @@ RSS_SOURCES = [
     ("Analytics Vidhya",     "https://www.analyticsvidhya.com/blog/feed/",                            3),
 
     # == 无人机 ==
-    ("DJI 新闻",             "https://www.dji.com/cn/newsroom/rss.xml",                               5),
     ("Drone DJ",             "https://dronedj.com/feed/",                                             5),
     ("Drone Life",           "https://dronelife.com/feed/",                                           4),
     ("sUAS News",            "https://www.suasnews.com/feed/",                                        4),
-    ("Inside Unmanned",      "https://insideunmannedsystems.com/feed/",                               3),
 
     # == 具身机器人 / 人形机器人 ==
     ("The Robot Report",     "https://www.therobotreport.com/feed/",                                  5),
     ("IEEE Spectrum Robotics","https://spectrum.ieee.org/feeds/topic/robotics.rss",                   5),
     ("Robotics Business",    "https://www.roboticsbusinessreview.com/feed/",                          4),
-    ("Automation World",     "https://www.automationworld.com/rss.xml",                               3),
 
     # == 算力芯片 / 半导体 ==
-    ("AnandTech",            "https://www.anandtech.com/rss/",                                        5),
     ("SemiAnalysis",         "https://www.semianalysis.com/feed",                                     5),
     ("EE Times",             "https://www.eetimes.com/feed/",                                         4),
     ("Semiconductor Digest", "https://www.semiconductor-digest.com/feed/",                            4),
     ("Tom's Hardware",       "https://www.tomshardware.com/feeds/all",                                3),
 
-    # == 新型电池 / 红外 / 硬科技 ==
-    ("OFweek 电子工程",      "https://news.ofweek.com/rss/epaper.xml",                                4),
+    # == 新型电池 / 硬科技 ==
     ("Electrek",             "https://electrek.co/feed/",                                             4),
     ("CleanTechnica",        "https://cleantechnica.com/feed/",                                       4),
-    ("New Atlas Tech",       "https://newatlas.com/feed/",                                            3),
     ("Ars Technica Hardware","https://feeds.arstechnica.com/arstechnica/gadgets",                     3),
 
     # == 新增：AI 巨头官方 Blog ==
@@ -576,7 +563,6 @@ def summarize_news(raw_results):
 - 每个独立事件都必须输出一条，即使你认为不重要也要打低分(1-3分)输出，不得遗漏任何独立事件
 - 输出条目数通常在10-20条之间。如果你只输出了不到10条，说明你合并过度，请回头检查是否漏掉了独立事件
 - 例：OpenAI发布模型 vs OpenAI首席科学家发文 vs OpenAI承认安全事件 = 3个不同事件，必须输出3条
-- 【资讯汇总拆分】极客公园"极客早知道"、36氪快讯等是每日汇总，一篇正文包含多个独立新闻。遇到这类必须拆成多条独立条目分别输出，每个子新闻一条，绝对不得只提取标题里第一个事件。例：一篇含"华为昇腾960发布、黄仁勋芯片翻倍、Manus融资"的汇总，要拆成3条独立输出
 
 【输出要求】
 对合并后的每个独立事件输出：
