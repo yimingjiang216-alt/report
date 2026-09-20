@@ -502,6 +502,46 @@ def call_llm(messages):
     session.close()
 
 
+def _resolve_url(item, url_index, raw_results, log_match=True):
+    """
+    为一条新闻条目回填 source_url。统一 URL 解析逻辑，消除重复代码。
+    优先级：1) source_index 精确反查  2) 标题 bigram 相似度匹配(阈值0.5)
+    返回 (url, source_index_str)。配不到返回 ("", 原source_index)。
+    """
+    idx = str(item.get("source_index", "") or "").strip()
+    # 1. source_index 精确反查
+    if idx and idx in url_index and url_index[idx]:
+        return url_index[idx], idx
+
+    # 2. 标题全文 bigram 相似度匹配（不配置错的URL）
+    item_title_full = re.sub(r"\s+", "", item.get("title", "")).lower()
+    item_bgs = set(item_title_full[k:k+2] for k in range(len(item_title_full)-1)) if len(item_title_full) > 2 else set()
+    best_url, best_idx, best_ratio = "", idx, 0.0
+    for ri, r in enumerate(raw_results):
+        raw_t = re.sub(r"\s+", "", r.get("title", "")).lower()
+        if not raw_t or not r.get("url"):
+            continue
+        raw_bgs = set(raw_t[k:k+2] for k in range(len(raw_t)-1))
+        if not item_bgs or not raw_bgs:
+            continue
+        overlap = len(item_bgs & raw_bgs)
+        ratio = overlap / min(len(item_bgs), len(raw_bgs)) if min(len(item_bgs), len(raw_bgs)) else 0
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_url = r.get("url")
+            best_idx = str(ri + 1)
+
+    # 只有相似度足够高（>0.5）才配，否则宁可缺失也不配错
+    if best_url and best_ratio > 0.5:
+        if log_match:
+            log.info(f"  URL相似度匹配: [{item.get('title','')[:30]}] → {best_url[:50]} ({best_ratio:.2f})")
+        return best_url, best_idx
+    else:
+        if log_match:
+            log.warning(f"  URL缺失(相似度不足{best_ratio:.2f}): [{item.get('title','')[:30]}]")
+        return "", idx
+
+
 def summarize_news(raw_results):
     if not raw_results:
         return []
@@ -667,30 +707,10 @@ def summarize_news(raw_results):
                     pass
         if parsed:
                 for i, item in enumerate(parsed):
-                    # URL修正：source_index反查 → 模糊标题匹配兜底
-                    idx = str(item.get("source_index", ""))
-                    if idx in url_index and url_index[idx]:
-                        item["source_url"] = url_index[idx]
-                    else:
-                        # source_index查不到，用标题全文bigram相似度匹配（不配置错的URL）
-                        item_title_full = re.sub(r"\s+", "", item.get("title", "")).lower()
-                        item_bgs = set(item_title_full[k:k+2] for k in range(len(item_title_full)-1)) if len(item_title_full) > 2 else set()
-                        best_url, best_ratio = "", 0.0
-                        for r in raw_results:
-                            raw_title = re.sub(r"\s+", "", r.get("title", "")).lower()
-                            if not raw_title or not r.get("url"):
-                                continue
-                            raw_bgs = set(raw_title[k:k+2] for k in range(len(raw_title)-1))
-                            if not item_bgs or not raw_bgs:
-                                continue
-                            overlap = len(item_bgs & raw_bgs)
-                            ratio = overlap / min(len(item_bgs), len(raw_bgs)) if min(len(item_bgs), len(raw_bgs)) else 0
-                            if ratio > best_ratio:
-                                best_ratio = ratio
-                                best_url = r.get("url")
-                        if best_url and best_ratio > 0.5:
-                            item["source_url"] = best_url
-                        # 相似度不足就保持空，后续在出口检查还有一层兜底
+                    # URL修正：统一用 _resolve_url 回填
+                    resolved_url, resolved_idx = _resolve_url(item, url_index, raw_results, log_match=False)
+                    item["source_url"] = resolved_url
+                    item["source_index"] = resolved_idx
                     # ── 标签白名单过滤（只保留合法标签，去掉LLM自创的） ──
                     VALID_CATS = {"AI大模型","算力芯片","具身机器人","无人机","新型储能","技术突破","产业动态"}
                     cat = item.get("category","")
@@ -962,39 +982,13 @@ def summarize_news(raw_results):
                     # 摘要清理HTML残留
                     item["summary"] = re.sub(r"<[^>]+>", "", item["summary"]).strip()
 
-                    # URL验证
+                    # URL验证：统一用 _resolve_url
                     url = item.get("source_url", "")
                     if not url or "http" not in url:
-                        # 重新尝试source_index反查
-                        idx = str(item.get("source_index", ""))
-                        if idx in url_index and url_index[idx]:
-                            item["source_url"] = url_index[idx]
-                            url = item["source_url"]
-                        else:
-                            # source_index查不到，用标题全文做bigram相似度匹配（而非前10字子串，避免配错）
-                            item_title_full = re.sub(r"\s+", "", item.get("title", "")).lower()
-                            item_bgs = set(item_title_full[k:k+2] for k in range(len(item_title_full)-1)) if len(item_title_full) > 2 else set()
-                            best_match, best_ratio = None, 0.0
-                            for ri, r in enumerate(raw_results):
-                                raw_t = re.sub(r"\s+", "", r.get("title", "")).lower()
-                                if not raw_t or not r.get("url"):
-                                    continue
-                                raw_bgs = set(raw_t[k:k+2] for k in range(len(raw_t)-1))
-                                if not item_bgs or not raw_bgs:
-                                    continue
-                                overlap = len(item_bgs & raw_bgs)
-                                ratio = overlap / min(len(item_bgs), len(raw_bgs)) if min(len(item_bgs), len(raw_bgs)) else 0
-                                if ratio > best_ratio:
-                                    best_ratio = ratio
-                                    best_match = (r.get("url"), ri)
-                            # 只有相似度足够高（>0.5）才配，否则宁可缺失也不配错
-                            if best_match and best_ratio > 0.5:
-                                item["source_url"] = best_match[0]
-                                url = best_match[0]
-                                item["source_index"] = str(best_match[1] + 1)
-                                log.info(f"  URL相似度匹配: [{item.get('title','')}] → {url[:50]} ({best_ratio:.2f})")
-                            else:
-                                log.warning(f"  URL缺失(相似度不足{best_ratio:.2f}): [{item.get('title','')}]")
+                        resolved_url, resolved_idx = _resolve_url(item, url_index, raw_results, log_match=True)
+                        item["source_url"] = resolved_url
+                        item["source_index"] = resolved_idx
+                        url = resolved_url
                     if url in seen_urls:
                         log.warning(f"  URL重复: [{item.get('title','')}] → {url[:50]}")
                     seen_urls.add(url)
