@@ -1184,7 +1184,9 @@ def send_feishu(news_items, report_date):
 
         cat_elem = {"tag": "text", "text": f"{i}. 【{cat}】"}
         title_elem = {"tag": "a", "text": title, "href": url} if url else {"tag": "text", "text": title}
-        content_lines.append([cat_elem, title_elem])
+        # 分类和标题分两行，避免挤在一行导致标题被飞书截断
+        content_lines.append([cat_elem])
+        content_lines.append([title_elem])
         content_lines.append([{"tag": "text", "text": summary}])
         content_lines.append([{"tag": "text", "text": ""}])  # 空行分隔
 
