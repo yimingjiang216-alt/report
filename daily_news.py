@@ -797,6 +797,28 @@ def summarize_news(raw_results):
                 for item in parsed:
                     item["selected"] = False
 
+                # ── 代码级赛道关键词硬校验：无关新闻强制降分 ──
+                # 不赌LLM自觉，用关键词判断是否属于五大赛道
+                TRACK_KWS = {
+                    "AI大模型": ["ai", "人工智能", "大模型", "模型", "gpt", "llm", "agent", "智能体", "deepseek", "chatgpt", "claude", "gemini", "qwen", "通义", "智谱", "openai", "anthropic", "谷歌", "google", "meta", "微软", "算法", "机器学习", "深度学习", "生成式", "推理"],
+                    "算力芯片": ["芯片", "gpu", "npu", "半导体", "晶圆", "算力", "封测", "光刻", "英伟达", "nvidia", "昇腾", "晶圆", "制程", "处理器", "chip", "semiconductor", "foundry"],
+                    "具身机器人": ["机器人", "具身", "humanoid", "人形", "机械臂", "robotics", "robots", "麦肯", "宇树", "figure", "特斯拉optimus", "digit", "机械狗", "协作机器人"],
+                    "无人机": ["无人机", "drone", "uav", "evtol", "dji", "大疆", "无人系统", "低空", "飞行器", "unmanned", "多旋翼", "配送机"],
+                    "新型储能": ["电池", "储能", "固态", "锂", "battery", "储能", "充电", "光伏", "新能源", "燃料电池", "钠离子", "energy storage", "超级快充", "换电"],
+                }
+                for item in parsed:
+                    text_blob = (item.get("title", "") + " " + item.get("summary", "")).lower()
+                    matched = False
+                    for track, kws in TRACK_KWS.items():
+                        if any(k in text_blob for k in kws):
+                            matched = True
+                            break
+                    if not matched:
+                        # 标题摘要完全不含任何赛道关键词 → 判无关新闻
+                        item["score"] = 0
+                        item["_irrelevant"] = True
+                        log.info(f"  无关新闻过滤: [{item.get('title','')[:30]}] → 强制0分")
+
                 # 按分数降序排列（int排序，确保类型一致）
                 for item in parsed:
                     try:
