@@ -991,16 +991,23 @@ def summarize_news(raw_results):
                     if not item.get("selected"):
                         continue
 
-                    # 标题：超过22字强制截断（飞书显示上限，超过会截断出半截字）
+                    # 标题：超过22字截断，且必须在合理边界（标点/空格），避免截出半截词
                     title = item.get("title", "")
                     if len(title) > 22:
-                        # 在最后一个逗号/顿号/空格处截断，保持语义完整
                         cut = title[:22]
-                        for ch in ["，", "、", "：", " ", "　"]:
+                        # 优先在标点处截断
+                        best = -1
+                        for ch in ["，", "、", "：", "。", "；", " ", "　", "-", "/"]:
                             pos = cut.rfind(ch)
-                            if 15 <= pos:
-                                cut = cut[:pos]
-                                break
+                            if pos > best:
+                                best = pos
+                        if best >= 14:  # 至少保留了足够信息量才在标点截断
+                            cut = cut[:best]
+                        # 否则直接硬截22字（保证不超宽）
+                        else:
+                            cut = cut[:22]
+                        # 去掉可能遗留的尾部标点
+                        cut = cut.rstrip("，、：。； -/")
                         item["title"] = cut
                         log.info(f"  标题截断: {title[:40]}... → {item['title']}")
 
@@ -1078,7 +1085,8 @@ def summarize_news(raw_results):
 
     log.warning("JSON 解析失败，使用兜底内容")
     return [{"index": 1, "category": "其他", "title": "科技前沿简报", "summary": raw_text[:500],
-             "source_url": "", "source_name": "AI汇总", "author": "", "comments": ""}]
+             "source_url": "", "source_name": "AI汇总", "author": "", "comments": "",
+             "selected": False, "score": 0}]
 
 
 # ── 3. Render HTML ────────────────────────────────────────────────────────────
@@ -1235,7 +1243,11 @@ def send_feishu(news_items, report_date):
 
     # 取selected的5条
     selected = [item for item in news_items if item.get("selected") is True]
-    items = selected[:5] if len(selected) >= 5 else news_items[:5]
+    # 没有任何真正选中的条目时，不推送（避免发兜底垃圾内容）
+    if not selected:
+        log.error("没有选中任何条目，跳过飞书推送")
+        return False
+    items = selected[:5]
 
     # 构建富文本内容
     content_lines = []
@@ -1431,16 +1443,25 @@ def main():
         log.error("无结果，退出")
         sys.exit(1)
 
-    # ── 过滤2天前旧文章（每天跑一次，2天窗口+1天冗余） ──
-    cutoff = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+    # ── 过滤旧文章：只保留最近3天（每天跑，3天窗口足够覆盖；更久的一律丢弃） ──
+    cutoff = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
     fresh_results = []
+    dropped_unknown = 0
+    dropped_old = 0
     for item in raw_results:
-        pub = item.get("pub", "") or item.get("pub_date", "")
-        pub_clean = pub[:16].replace("T", " ") if pub else "未知"
-        if pub_clean != "未知" and pub_clean[:10] < cutoff:
+        # 统一从 pub / pub_date / published 三个字段拿时间
+        pub = item.get("pub") or item.get("pub_date") or item.get("published") or ""
+        pub_clean = (pub or "").strip()[:10].replace("T", " ").replace("/", "-")
+        # 只认形如 YYYY-MM-DD 的合法日期
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", pub_clean):
+            # 时间缺失/格式异常的，谨慎处理：丢弃，避免把旧闻当新闻
+            dropped_unknown += 1
+            continue
+        if pub_clean < cutoff:
+            dropped_old += 1
             continue
         fresh_results.append(item)
-    log.info(f"过滤旧文章: {len(raw_results)} → {len(fresh_results)} 篇（3天内）")
+    log.info(f"过滤旧文章: {len(raw_results)} → {len(fresh_results)} 篇（丢弃{dropped_old}条过期、{dropped_unknown}条无时间）")
     raw_results = fresh_results
 
     # ── 保存精选素材清单到 dp3 文件夹，方便溯源 ──
@@ -1489,7 +1510,9 @@ def main():
     try:
         selected_items = [item for item in news_items if item.get("selected") is True]
         final_5 = selected_items[:5] if len(selected_items) >= 5 else news_items[:5]
-        new_titles = [item.get("title", "") for item in final_5]
+        # 过滤掉兜底内容（title是"科技前沿简报"的占位条目，不是真新闻，不能进去重库）
+        valid_final = [it for it in final_5 if it.get("title", "") != "科技前沿简报" and it.get("score", 0) > 0]
+        new_titles = [item.get("title", "") for item in valid_final]
         last_sent_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_sent.json")
         # 读取旧标题，合并保留最近3期
         old_titles = []
