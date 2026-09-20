@@ -252,43 +252,6 @@ BLOG_SOURCES = [
     ("Tesla AI Blog",   "https://www.tesla.com/en_us/blog",              4),
 ]
 
-def _fetch_blog_scraper(source_name, blog_url, max_items=3):
-    """通过 Jina Reader 抓取没有 RSS 的博客列表页，提取文章标题和链接"""
-    try:
-        resp = requests.get(
-            f"https://r.jina.ai/{blog_url}",
-            headers={**_HTTP_HEADERS, "Accept": "text/plain", "X-Return-Format": "text", "X-Timeout": "15"},
-            timeout=25,
-        )
-        if resp.status_code != 200:
-            return []
-        text = resp.text
-        # 提取 markdown 格式链接 [title](url)
-        links = re.findall(r'\[([^\]]{10,120})\]\((https?://[^\)]+)\)', text)
-        results = []
-        seen = set()
-        for title, url in links:
-            title = title.strip()
-            # 过滤导航菜单等无意义链接
-            if any(w in title.lower() for w in ['home', 'about', 'contact', 'menu', 'search', 'login', 'sign']):
-                continue
-            if url in seen:
-                continue
-            seen.add(url)
-            results.append({
-                "title": title, "url": url, "rss_summary": "",
-                "content": "", "pub": datetime.now().strftime("%Y-%m-%d"),
-                "source": source_name, "author": "",
-            })
-            if len(results) >= max_items:
-                break
-        log.info(f"Blog scrape [{source_name}]: {len(results)} items")
-        return results
-    except Exception as e:
-        log.warning(f"Blog scrape failed [{source_name}]: {e}")
-        return []
-
-
 def _fetch_fulltext_jina(url):
     try:
         resp = requests.get(
@@ -730,7 +693,6 @@ def summarize_news(raw_results):
                             prev_bigrams_list.append(bgs)
                 except Exception:
                     pass
-                prev_set = set()  # 保留精确匹配兼容
 
                 # 清除所有selected标记，由代码统一决定
                 for item in parsed:
@@ -834,7 +796,6 @@ def summarize_news(raw_results):
                 final = []
                 company_count = {}  # {公司: 出现次数}
                 used_urls = set()   # 已选URL，防止重复链接
-                seen_tracks = set()
                 for item in all_sorted:
                     if len(final) >= 5:
                         break
@@ -874,7 +835,6 @@ def summarize_news(raw_results):
                         company_count[c] = company_count.get(c, 0) + 1
                     if item_url:
                         used_urls.add(item_url)
-                    seen_tracks.add(_get_track(item))
                     log.info(f"  质量入选: [{item.get('title','')}] (公司:{companies}, 分{score}, 赛道:{_get_track(item)})")
 
                 # === 阶段2：兜底补满（普通事件，同公司尽量不重复，URL不重复） ===
@@ -1371,7 +1331,7 @@ def main():
     subject = f"📡 科技前沿简报 · {report_date}"
 
     log.info("【Step 1】拉取 RSS 新闻...")
-    raw_results, all_rss_articles = search_news()
+    raw_results, _ = search_news()
 
     log.info("【Step 1b】调用 aihot API 获取 AI 精选动态...")
     aihot_results = fetch_aihot_api(limit=30)
