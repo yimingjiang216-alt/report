@@ -840,6 +840,9 @@ def summarize_news(raw_results):
                 for item in all_sorted:
                     if len(final) >= 5:
                         break
+                    # 0分条目（无关新闻/LLM弃选）彻底排除，不进选择
+                    if int(item.get("score", 0) or 0) <= 0:
+                        continue
                     if _is_dup(item):
                         log.info(f"  跨期去重: [{item.get('title','')}]")
                         continue
@@ -888,6 +891,9 @@ def summarize_news(raw_results):
                             log.info(f"  同次去重: [{item.get('title','')[:30]}]")
                             continue
                         score = int(item.get("score", 0) or 0)
+                        # 0分条目（无关新闻）不进阶段2
+                        if score <= 0:
+                            continue
                         is_dup = _is_dup(item)
                         # 放宽逻辑：跨期重复但分数≥6的，允许进入补位（重要旧闻不丢）
                         if is_dup and score < 6:
