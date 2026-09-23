@@ -1352,8 +1352,8 @@ def main():
         log.error("无结果，退出")
         sys.exit(1)
 
-    # ── 过滤旧文章：只保留最近3天（每天跑，3天窗口足够覆盖；更久的一律丢弃） ──
-    cutoff = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+    # ── 过滤旧文章：只保留最近2天（每天跑，2天窗口足够；更久的一律丢弃） ──
+    cutoff = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
     fresh_results = []
     dropped_unknown = 0
     dropped_old = 0
