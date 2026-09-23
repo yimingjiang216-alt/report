@@ -370,12 +370,13 @@ TRACK_KEYWORDS = {
 }
 
 # 常见公司/机构名（跨期去重时剔除，避免"同一公司开头"的标题被误判重复）
+# 注意：只保留中文名 + 足够长的英文名，避免短英文(meta/ibm/amd等)误删普通英文单词里的字母串
 COMPANY_NAMES = [
-    "openai", "anthropic", "google", "谷歌", "deepmind", "meta", "microsoft", "微软",
+    "openai", "anthropic", "google", "谷歌", "deepmind", "microsoft", "微软",
     "英伟达", "nvidia", "apple", "苹果", "amazon", "aws", "tesla", "特斯拉",
-    "华为", "intel", "英特尔", "amd", "百度", "阿里", "阿里巴巴", "腾讯",
+    "华为", "intel", "英特尔", "百度", "阿里", "阿里巴巴", "腾讯",
     "字节跳动", "bytedance", "京东", "美团", "小米", "xiaomi", "oppo", "vivo",
-    "大疆", "dji", "宇树", "unitree", "figure", "软银", "softbank", "ibm",
+    "大疆", "dji", "宇树", "unitree", "figure ai", "软银", "softbank",
     "三星", "samsung", "sony", "索尼", "uber", "lyft", "netflix", "奈飞",
     "智谱", "zhipu", "月之暗面", "moonshot", "阶跃星辰", "stepfun", "kimi",
     "deepseek", "minimax", "零一万物", "百川", "讯飞", "iflytek",
