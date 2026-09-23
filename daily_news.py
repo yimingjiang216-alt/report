@@ -369,6 +369,29 @@ TRACK_KEYWORDS = {
     "新型储能": ["电池","储能","battery","固态","energy storage"],
 }
 
+# 常见公司/机构名（跨期去重时剔除，避免"同一公司开头"的标题被误判重复）
+COMPANY_NAMES = [
+    "openai", "anthropic", "google", "谷歌", "deepmind", "meta", "microsoft", "微软",
+    "英伟达", "nvidia", "apple", "苹果", "amazon", "aws", "tesla", "特斯拉",
+    "华为", "intel", "英特尔", "amd", "百度", "阿里", "阿里巴巴", "腾讯",
+    "字节跳动", "bytedance", "京东", "美团", "小米", "xiaomi", "oppo", "vivo",
+    "大疆", "dji", "宇树", "unitree", "figure", "软银", "softbank", "ibm",
+    "三星", "samsung", "sony", "索尼", "uber", "lyft", "netflix", "奈飞",
+    "智谱", "zhipu", "月之暗面", "moonshot", "阶跃星辰", "stepfun", "kimi",
+    "deepseek", "minimax", "零一万物", "百川", "讯飞", "iflytek",
+]
+
+def _strip_companies(text):
+    """剔除标题中的公司名，用于跨期去重时避免"同公司开头"误判重复。"""
+    if not text:
+        return text
+    t = text.lower()
+    for c in COMPANY_NAMES:
+        if c in t:
+            t = t.replace(c, "")
+    # 去掉剔除后可能残留的空格
+    return re.sub(r"\s+", "", t)
+
 
 def fetch_aihot_api(limit=30) -> list[dict]:
     """
@@ -693,7 +716,7 @@ def summarize_news(raw_results):
                             _last_data = json.load(f)
                         prev_titles_raw = _last_data.get("titles", [])
                         for pt in prev_titles_raw:
-                            t = re.sub(r"\s+", "", pt).lower()
+                            t = _strip_companies(pt)
                             bgs = set(t[k:k+2] for k in range(len(t)-1)) if len(t) > 1 else set()
                             prev_bigrams_list.append(bgs)
                 except Exception:
@@ -754,8 +777,8 @@ def summarize_news(raw_results):
                     return "AI大模型"
 
                 def _is_dup(item):
-                    """检查跨期重复：bigram重合率>35%就认为是同一事件（降低阈值防止换措辞逃过去重）"""
-                    t = re.sub(r"\s+", "", item.get("title", "")).lower()
+                    """检查跨期重复：bigram重合率>0.5才判重复（语义重复已交给LLM，这里只拦字面几乎一样的）"""
+                    t = _strip_companies(item.get("title", ""))
                     if len(t) < 4:
                         return False
                     item_bgs = set(t[k:k+2] for k in range(len(t)-1))
@@ -765,10 +788,10 @@ def summarize_news(raw_results):
                     for pi, prev_bgs in enumerate(prev_bigrams_list):
                         if not prev_bgs:
                             continue
-                        # 标题bigram匹配
+                        # 标题bigram匹配（已剔除公司名，阈值提到0.5避免误杀）
                         overlap = len(item_bgs & prev_bgs)
                         ratio = overlap / min(len(item_bgs), len(prev_bgs))
-                        if ratio > 0.35:
+                        if ratio > 0.5:
                             return True
                         # 摘要也包含上期标题的关键词（兜底）
                         if summ_bgs:
