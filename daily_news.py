@@ -443,39 +443,70 @@ def fetch_aihot_api(limit=30) -> list[dict]:
 # ── 2. LLM ────────────────────────────────────────────────────────────────────
 
 def call_llm(messages):
+    """
+    调用大模型。为跨国网络做稳定性处理：
+    - 每次重试都新建独立 Session（旧连接池可能已被污染/半死）
+    - 长连接超时 + 长读取超时
+    - 固定间隔快速重试（不递增等待），最多 8 次
+    - 连接失败时主动关闭旧 session 再重试
+    """
     if not ANTHROPIC_AUTH_TOKEN:
         raise ValueError("ANTHROPIC_AUTH_TOKEN not set")
-    max_retries = 5
-    # 使用 Session + 连接池提高跨国连接稳定性
-    session = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(max_retries=3, pool_connections=1, pool_maxsize=1)
-    session.mount("https://", adapter)
+
+    max_retries = 8
+    payload = {"model": LLM_MODEL, "max_tokens": 16384, "messages": messages}
+    headers = {"Authorization": f"Bearer {ANTHROPIC_AUTH_TOKEN}", "Content-Type": "application/json"}
+    url = f"{LLM_BASE_URL}/chat/completions"
+    last_err = None
+
     for attempt in range(max_retries):
+        session = None
         try:
+            # 每次重试新建 session，避免复用已失效的连接
+            session = requests.Session()
+            adapter = requests.adapters.HTTPAdapter(
+                max_retries=0,              # 重试由本函数控制，避免自动重试掩盖问题
+                pool_connections=1,
+                pool_maxsize=1,
+            )
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+
             resp = session.post(
-                f"{LLM_BASE_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {ANTHROPIC_AUTH_TOKEN}", "Content-Type": "application/json"},
-                json={"model": LLM_MODEL, "max_tokens": 16384, "messages": messages},
-                timeout=(30, 600),  # (连接超时30秒, 读取超时600秒)
+                url, headers=headers, json=payload,
+                timeout=(60, 600),          # 连接60秒(跨国链路慢)，读取600秒
             )
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
+
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
+            last_err = e
             if status in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
-                wait = 20 * (attempt + 1)  # 20/40/60/80秒，不指数增长
-                log.warning(f"LLM HTTP {status} (第{attempt+1}次)，{wait}秒后重试")
+                wait = 20
+                log.warning(f"LLM HTTP {status} (第{attempt+1}/{max_retries}次)，{wait}秒后重试")
                 time.sleep(wait)
             else:
                 raise
+
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            last_err = e
             if attempt < max_retries - 1:
-                wait = 20 * (attempt + 1)  # 20/40/60/80秒
-                log.warning(f"LLM 连接失败 (第{attempt+1}次)，{wait}秒后重试: {e}")
+                wait = 20
+                log.warning(f"LLM 连接失败 (第{attempt+1}/{max_retries}次)，{wait}秒后重试: {str(e)[:80]}")
                 time.sleep(wait)
             else:
                 raise
-    session.close()
+
+        finally:
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
+    if last_err:
+        raise last_err
 
 
 def _resolve_url(item, url_index, raw_results, log_match=True):
