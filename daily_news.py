@@ -125,7 +125,7 @@ RSS_SOURCES = [
 ]
 
 JINA_MAX_CHARS = 3000   # Jina 抓取正文的上限（保留完整数据）
-LLM_CONTENT_CHARS = 1600  # 送 LLM 时每篇截断上限（控制请求体积，避免服务端 RemoteDisconnected）
+LLM_CONTENT_CHARS = 1000  # 送 LLM 时每篇截断上限（控制请求体积，避免服务端超时/断开）
 RSS_PER_SOURCE = 6  # 每天跑一次，每源取6条确保覆盖充分
 JINA_DELAY_SEC = 1.0
 
@@ -329,8 +329,8 @@ def search_news():
         if taken:
             log.info(f"  赛道[{track}] 取 {len(taken)} 篇（共 {len(bucket)} 篇可选）")
 
-    # AI通用取剩余名额，总数上限35条（每篇正文已限1600字，总量可控）
-    remaining_quota = max(35 - len(candidates), 15)
+    # AI通用取剩余名额，总数上限25条（每篇正文限1000字，请求体积约3万字符）
+    remaining_quota = max(25 - len(candidates), 12)
     ai_sorted = sorted(buckets["AI通用"], key=lambda x: x.get("weight", 1), reverse=True)
     candidates.extend(ai_sorted[:remaining_quota])
     log.info(f"  赛道[AI通用] 取 {min(remaining_quota, len(ai_sorted))} 篇（共 {len(ai_sorted)} 篇可选）")
@@ -460,8 +460,8 @@ def call_llm(messages):
     if not ANTHROPIC_AUTH_TOKEN:
         raise ValueError("ANTHROPIC_AUTH_TOKEN not set")
 
-    max_retries = 8
-    payload = {"model": LLM_MODEL, "max_tokens": 16384, "messages": messages}
+    max_retries = 6
+    payload = {"model": LLM_MODEL, "max_tokens": 6000, "messages": messages}
     headers = {"Authorization": f"Bearer {ANTHROPIC_AUTH_TOKEN}", "Content-Type": "application/json"}
     url = f"{LLM_BASE_URL}/chat/completions"
     last_err = None
@@ -481,7 +481,7 @@ def call_llm(messages):
 
             resp = session.post(
                 url, headers=headers, json=payload,
-                timeout=(60, 600),          # 连接60秒(跨国链路慢)，读取600秒
+                timeout=(30, 150),          # 连接30秒、读取150秒（快速失败，不卡满30分钟上限）
             )
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
@@ -490,7 +490,7 @@ def call_llm(messages):
             status = e.response.status_code if e.response is not None else 0
             last_err = e
             if status in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
-                wait = 20
+                wait = 10
                 log.warning(f"LLM HTTP {status} (第{attempt+1}/{max_retries}次)，{wait}秒后重试")
                 time.sleep(wait)
             else:
@@ -499,7 +499,7 @@ def call_llm(messages):
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             last_err = e
             if attempt < max_retries - 1:
-                wait = 20
+                wait = 10
                 log.warning(f"LLM 连接失败 (第{attempt+1}/{max_retries}次)，{wait}秒后重试: {str(e)[:80]}")
                 time.sleep(wait)
             else:
