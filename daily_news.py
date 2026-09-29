@@ -18,7 +18,13 @@ log = logging.getLogger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────────
 ANTHROPIC_AUTH_TOKEN = os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("ANTHROPIC_API_KEY") or ""
 _base = os.environ.get("ANTHROPIC_BASE_URL") or os.environ.get("LLM_BASE_URL") or "https://pool.autelrobotics.com"
-LLM_BASE_URL   = _base.rstrip("/") + "/v1"
+_base = _base.rstrip("/")
+# 不同厂商端点路径不同：智谱是 /api/paas/v4，SiliconFlow/OpenAI 是 /v1
+# 如果 base_url 已含版本路径就不再加 /v1
+if re.search(r"/v\d+$", _base) or "/api/paas/" in _base:
+    LLM_BASE_URL = _base
+else:
+    LLM_BASE_URL = _base + "/v1"
 LLM_MODEL      = os.environ.get("LLM_MODEL", "claude-opus-4-6")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 TO_EMAIL       = [e.strip() for e in os.environ.get("TO_EMAIL", "yimingjiang216@gmail.com").split(",") if e.strip()]
