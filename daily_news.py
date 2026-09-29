@@ -118,7 +118,8 @@ RSS_SOURCES = [
     ("虎嗅-无人机",          f"{RSSHUB_URL}/huxiu/search/无人机",                                    4),
 ]
 
-JINA_MAX_CHARS = 1200  # 每篇正文上限（原3000，请求过大导致SiliconFlow服务端断开，降到1200）
+JINA_MAX_CHARS = 3000   # Jina 抓取正文的上限（保留完整数据）
+LLM_CONTENT_CHARS = 1600  # 送 LLM 时每篇截断上限（控制请求体积，避免服务端 RemoteDisconnected）
 RSS_PER_SOURCE = 6  # 每天跑一次，每源取6条确保覆盖充分
 JINA_DELAY_SEC = 1.0
 
@@ -322,8 +323,8 @@ def search_news():
         if taken:
             log.info(f"  赛道[{track}] 取 {len(taken)} 篇（共 {len(bucket)} 篇可选）")
 
-    # AI通用取剩余名额，总数上限30条（原40，请求过大导致服务端断开）
-    remaining_quota = max(30 - len(candidates), 15)
+    # AI通用取剩余名额，总数上限35条（每篇正文已限1600字，总量可控）
+    remaining_quota = max(35 - len(candidates), 15)
     ai_sorted = sorted(buckets["AI通用"], key=lambda x: x.get("weight", 1), reverse=True)
     candidates.extend(ai_sorted[:remaining_quota])
     log.info(f"  赛道[AI通用] 取 {min(remaining_quota, len(ai_sorted))} 篇（共 {len(ai_sorted)} 篇可选）")
@@ -557,7 +558,7 @@ def summarize_news(raw_results):
     url_index = {str(i+1): r.get("url", "") for i, r in enumerate(raw_results)}
 
     materials = "\n\n".join(
-        f"[{i+1}] 来源:{r.get('source','')} 作者:{r.get('author','')}\nURL:{r.get('url','')}\n标题:{r['title']}\n正文:\n{r['content'] or r.get('rss_summary','')}"
+        f"[{i+1}] 来源:{r.get('source','')} 作者:{r.get('author','')}\nURL:{r.get('url','')}\n标题:{r['title']}\n正文:\n{(r.get('content') or r.get('rss_summary',''))[:LLM_CONTENT_CHARS]}"
         for i, r in enumerate(raw_results)
     )
 
