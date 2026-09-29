@@ -684,7 +684,29 @@ def summarize_news(raw_results):
                     parsed = json.loads("\n".join(cleaned))
                     log.info("JSON修复成功（逐行清理引号）")
                 except json.JSONDecodeError:
-                    pass
+                    # 第四级修复：补全缺失的 key 名（LLM 偶尔漏写 "title": 之类的键名）
+                    # 特征：某行只有字符串值（"xxx",），且上一行是 "index": N,
+                    repaired = []
+                    for idx2, line in enumerate(cleaned):
+                        st = line.strip()
+                        # 判断：只有值没有key 的行（以引号开头结尾，且不含 "): 这种key分隔）
+                        if (st.startswith('"') and
+                                (st.endswith('",') or st.endswith('"')) and
+                                '":' not in st):
+                            # 看上一行是不是 "index": N,
+                            prev = cleaned[idx2-1].strip() if idx2 > 0 else ""
+                            if re.match(r'^"index"\s*:\s*\d+,?$', prev):
+                                # 补上 title key
+                                indent = line[:len(line) - len(line.lstrip())]
+                                repaired.append(f'{indent}"title": {st}')
+                                log.info(f"  JSON修复: 补全缺失的 title key → {st[:40]}")
+                                continue
+                        repaired.append(line)
+                    try:
+                        parsed = json.loads("\n".join(repaired))
+                        log.info("JSON修复成功（补全缺失key）")
+                    except json.JSONDecodeError:
+                        pass
         if parsed:
                 for i, item in enumerate(parsed):
                     # URL修正：统一用 _resolve_url 回填
