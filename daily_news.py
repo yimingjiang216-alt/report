@@ -461,8 +461,21 @@ def call_llm(messages):
         raise ValueError("ANTHROPIC_AUTH_TOKEN not set")
 
     max_retries = 6
-    payload = {"model": LLM_MODEL, "max_tokens": 6000, "messages": messages}
+    payload = {
+        "model": LLM_MODEL,
+        "max_tokens": 6000,
+        "messages": messages,
+    }
+    # OpenRouter 专用：优先选低延迟 provider，并允许故障转移
+    if "openrouter.ai" in LLM_BASE_URL:
+        payload["provider"] = {
+            "sort": "throughput",       # 按吞吐量排序，选最快的
+            "allow_fallbacks": True,    # 允许自动切换到其他 provider
+        }
     headers = {"Authorization": f"Bearer {ANTHROPIC_AUTH_TOKEN}", "Content-Type": "application/json"}
+    if "openrouter.ai" in LLM_BASE_URL:
+        headers["HTTP-Referer"] = "https://github.com/yimingjiang216-alt/report"
+        headers["X-Title"] = "Tech Digest"
     url = f"{LLM_BASE_URL}/chat/completions"
     last_err = None
 
