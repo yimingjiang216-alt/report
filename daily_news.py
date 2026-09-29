@@ -118,7 +118,7 @@ RSS_SOURCES = [
     ("虎嗅-无人机",          f"{RSSHUB_URL}/huxiu/search/无人机",                                    4),
 ]
 
-JINA_MAX_CHARS = 3000
+JINA_MAX_CHARS = 1200  # 每篇正文上限（原3000，请求过大导致SiliconFlow服务端断开，降到1200）
 RSS_PER_SOURCE = 6  # 每天跑一次，每源取6条确保覆盖充分
 JINA_DELAY_SEC = 1.0
 
@@ -322,8 +322,8 @@ def search_news():
         if taken:
             log.info(f"  赛道[{track}] 取 {len(taken)} 篇（共 {len(bucket)} 篇可选）")
 
-    # AI通用取剩余名额，总数上限40条
-    remaining_quota = max(40 - len(candidates), 20)
+    # AI通用取剩余名额，总数上限30条（原40，请求过大导致服务端断开）
+    remaining_quota = max(30 - len(candidates), 15)
     ai_sorted = sorted(buckets["AI通用"], key=lambda x: x.get("weight", 1), reverse=True)
     candidates.extend(ai_sorted[:remaining_quota])
     log.info(f"  赛道[AI通用] 取 {min(remaining_quota, len(ai_sorted))} 篇（共 {len(ai_sorted)} 篇可选）")
