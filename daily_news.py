@@ -98,6 +98,7 @@ RSS_SOURCES = [
     ("Ars Technica Hardware","https://feeds.arstechnica.com/arstechnica/gadgets",                     3),
 
     # == 新增：AI 巨头官方 Blog ==
+    ("The Information",      "https://www.theinformation.com/feed",                                  5),
     ("Anthropic Blog",       "https://rsshub.bestblogs.dev/anthropic/news",                          5),
     ("Meta Engineering",     "https://engineering.fb.com/feed/",                                     5),
     ("AWS AI Blog",          "https://aws.amazon.com/blogs/machine-learning/feed/",                  4),
