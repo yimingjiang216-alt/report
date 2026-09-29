@@ -99,6 +99,8 @@ RSS_SOURCES = [
 
     # == 新增：AI 巨头官方 Blog ==
     ("The Information",      "https://www.theinformation.com/feed",                                  5),
+    ("Bloomberg Tech",       "https://feeds.bloomberg.com/technology/news.rss",                      5),
+    ("Platformer",           "https://www.platformer.news/rss/",                                     4),
     ("Anthropic Blog",       "https://rsshub.bestblogs.dev/anthropic/news",                          5),
     ("Meta Engineering",     "https://engineering.fb.com/feed/",                                     5),
     ("AWS AI Blog",          "https://aws.amazon.com/blogs/machine-learning/feed/",                  4),
