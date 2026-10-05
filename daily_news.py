@@ -2012,6 +2012,7 @@ def main():
         # 时间缺失/格式异常的，谨慎处理：丢弃，避免把旧闻当新闻
         if not pub_clean:
             dropped_unknown += 1
+            log.info(f"  无时间丢弃: [{(item.get('title','') or '')[:40]}] 来源:{item.get('source','')}")
             continue
         # 兜底筛也必须用同一套窗口，否则采样阶段给一手新闻室放宽的7天在这里又被砍掉
         item_cutoff = slow_cutoffs.get(item.get("source", ""), cutoff)
