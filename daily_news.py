@@ -148,7 +148,7 @@ LLM_CONTENT_CHARS = 3000  # 送 LLM 时每篇截断上限（与抓取一致，�
 RSS_PER_SOURCE = 6  # 每天跑一次，每源取6条确保覆盖充分
 JINA_DELAY_SEC = 0.2  # 每线程抓取前的小睡；并行5路下0.2秒足够防429
 FRESH_WINDOW_DAYS = 2   # 采样阶段就丢弃超过这个天数的文章，避免旧文占满名额
-RSS_CANDIDATE_MAX = 30  # 送 Jina/LLM 的 RSS 素材上限（全部为窗口内新鲜文章）
+RSS_CANDIDATE_MAX = 40  # 送 Jina/LLM 的 RSS 素材上限（全部为窗口内新鲜文章）
 AIHOT_MATERIAL_MAX = 10 # aihot 聚合源补充的素材上限
 LLM_EVENT_MAX = 22      # 单次 LLM 输出的事件条数上限，防正文生成被 max_tokens 截断
 LLM_READ_TIMEOUT = 300   # 流式下两次收到数据之间的最大空档（含首token等待）
@@ -1002,7 +1002,7 @@ def summarize_news(raw_results):
 
                 # ── 阶段B：比较式终审 ──
                 # LLM打绝对分尺度漂移（同日可能给十几条9分），但相对比较稳定。
-                # 用高分shortlist做「谁胜过谁」的排序，替代按绝对分开榜；
+                # 用高分shortlist做「谁胜过谁」的排序，再与阶段A的分数名次合并开榜；
                 # 调用失败或格式异常则退回阶段A的分数排序，不影响出报。
                 COMPARE_N = 20
                 shortlist = [it for it in stage_a_sorted if int(it.get("score", 0) or 0) > 0][:COMPARE_N]
@@ -1044,23 +1044,40 @@ def summarize_news(raw_results):
                                 if 0 <= vi < len(shortlist) and all(vi != r[0] for r in ranked):
                                     ranked.append((vi, v.get("reason", "")))
                         if len(ranked) >= len(shortlist) // 2:  # 至少排掉一半才采用，否则视为输出不可信
-                            # 模型没排到的，按阶段A顺序补在末尾，一条不丢
+                            # 模型没排到的，比较名次记在末尾，一条不丢
                             missed = [i for i in range(len(shortlist)) if all(i != r[0] for r in ranked)]
-                            ordered_shortlist = [shortlist[i] for i, _ in ranked] + [shortlist[i] for i in missed]
+                            rank_b = {idx: p for p, (idx, _) in enumerate(ranked)}
+                            for j, idx in enumerate(missed):
+                                rank_b[idx] = len(ranked) + j
+                            # 名次Borda合并：shortlist 按阶段A顺序构建，故分数名次就是下标 i。
+                            # 两趟各出一半票，任何一趟单独跑偏都掀不动榜单——
+                            # 分3要顶到分7前面，必须在比较排序里反超对方位次之和以上。
+                            merged = sorted(
+                                range(len(shortlist)),
+                                key=lambda i: (i + rank_b[i], rank_b[i],
+                                               -int(shortlist[i].get("score", 0) or 0)),
+                            )
+                            ordered_shortlist = []
+                            for i in merged:
+                                it = shortlist[i]
+                                it["_rank_a"], it["_rank_b"] = i + 1, rank_b[i] + 1
+                                ordered_shortlist.append(it)
                             in_shortlist = {id(it) for it in ordered_shortlist}
                             leftovers = [it for it in stage_a_sorted if id(it) not in in_shortlist]
                             all_sorted = ordered_shortlist + leftovers
-                            log.info(f"  比较式终审采用：shortlist {len(shortlist)} 条重排，前3条 "
+                            log.info(f"  比较式终审采用：Borda合并 shortlist {len(shortlist)} 条，前3条 "
                                      f"[{' / '.join(it.get('title','')[:20] for it in ordered_shortlist[:3])}]")
                         else:
                             log.warning(f"  比较式终审输出不完整（{len(ranked)}/{len(shortlist)}），退回分数排序")
                     except Exception as e:
                         log.warning(f"  比较式终审失败（退回分数排序）: {e}")
 
-                # 调试：输出排序后前8条
+                # 调试：输出排序后前8条（附两趟原始名次，便于核对合并结果）
                 for _di, _d in enumerate(all_sorted[:8]):
                     _co = (_d.get("companies","") or "").split("、")[0].split(",")[0].strip().lower()
-                    log.info(f"  排序#{_di+1}: 分{_d.get('score','')} 公司[{_co}] {_d.get('title','')[:25]}")
+                    _rk = (f" A{_d.get('_rank_a', '-')}B{_d.get('_rank_b', '-')}"
+                           if "_rank_a" in _d else "")
+                    log.info(f"  排序#{_di+1}: 分{_d.get('score','')}{_rk} 公司[{_co}] {_d.get('title','')[:25]}")
 
                 def _get_company(item):
                     # 提取所有公司（不只第一个），做同公司去重时更准确
