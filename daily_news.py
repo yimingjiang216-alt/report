@@ -34,6 +34,12 @@ FROM_EMAIL     = os.environ.get("FROM_EMAIL", "onboarding@resend.dev")
 CSV_PATH       = os.environ.get("CSV_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "媒体洞察调研看板_素材库_表格.csv"))
 RSSHUB_URL     = os.environ.get("RSSHUB_URL", "http://localhost:1200")  # 本地或公共RSSHub
 FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "https://open.feishu.cn/open-apis/bot/v2/hook/f2db3751-5063-4969-a732-54694a70731e")
+# 测试模式：只推飞书，不发邮件、不写 last_sent.json，手动试跑不污染正式去重库也不重复发信。
+# 测试模式绝不回退到正式群——没配 FEISHU_WEBHOOK_TEST 就一条都不发。
+TEST_MODE           = os.environ.get("TEST_MODE", "").strip() == "1"
+FEISHU_WEBHOOK_TEST = os.environ.get("FEISHU_WEBHOOK_TEST", "")
+if TEST_MODE:
+    FEISHU_WEBHOOK = FEISHU_WEBHOOK_TEST
 FEISHU_SECRET  = os.environ.get("FEISHU_SECRET", "")
 
 
@@ -1679,7 +1685,11 @@ def main():
     html_content = render_html(news_items, report_date)
 
     log.info("【Step 4】发送邮件...")
-    success = send_email(html_content, subject)
+    if TEST_MODE:
+        success = True
+        log.info("  测试模式：跳过邮件发送")
+    else:
+        success = send_email(html_content, subject)
 
     log.info("【Step 5】写入 CSV...")
     append_to_csv(news_items, report_date)
@@ -1691,29 +1701,32 @@ def main():
     send_feishu(news_items, report_date)
 
     # ── 保存本期标题，供跨期去重（保留最近3期=15条） ──
-    try:
-        selected_items = [item for item in news_items if item.get("selected") is True]
-        # 只用真正选中的条目；没选中就空列表，绝不拿未选中的凑数进去重库
-        valid_final = [it for it in selected_items if it.get("title", "") != "科技前沿简报" and it.get("score", 0) > 0]
-        new_titles = [item.get("title", "") for item in valid_final[:5]]
-        last_sent_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_sent.json")
-        # 读取旧标题，合并保留最近3期
-        old_titles = []
+    if TEST_MODE:
+        log.info("  测试模式：跳过 last_sent.json 写入，去重库保持不变")
+    else:
         try:
-            if os.path.exists(last_sent_path):
-                with open(last_sent_path, encoding="utf-8") as f:
-                    old_data = json.load(f)
-                old_titles = old_data.get("titles", [])
-        except Exception:
-            pass
-        # 新标题在前，旧标题在后，最多保留15条（3期×5条，每天跑需要覆盖更长去重窗口）
-        all_titles = new_titles + [t for t in old_titles if t not in new_titles]
-        all_titles = all_titles[:15]
-        with open(last_sent_path, "w", encoding="utf-8") as f:
-            json.dump({"titles": all_titles, "date": report_date}, f, ensure_ascii=False, indent=2)
-        log.info(f"✅ 已保存去重库到 last_sent.json（{len(all_titles)} 条，含上期）")
-    except Exception as e:
-        log.warning(f"保存 last_sent.json 失败: {e}")
+            selected_items = [item for item in news_items if item.get("selected") is True]
+            # 只用真正选中的条目；没选中就空列表，绝不拿未选中的凑数进去重库
+            valid_final = [it for it in selected_items if it.get("title", "") != "科技前沿简报" and it.get("score", 0) > 0]
+            new_titles = [item.get("title", "") for item in valid_final[:5]]
+            last_sent_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_sent.json")
+            # 读取旧标题，合并保留最近3期
+            old_titles = []
+            try:
+                if os.path.exists(last_sent_path):
+                    with open(last_sent_path, encoding="utf-8") as f:
+                        old_data = json.load(f)
+                    old_titles = old_data.get("titles", [])
+            except Exception:
+                pass
+            # 新标题在前，旧标题在后，最多保留15条（3期×5条，每天跑需要覆盖更长去重窗口）
+            all_titles = new_titles + [t for t in old_titles if t not in new_titles]
+            all_titles = all_titles[:15]
+            with open(last_sent_path, "w", encoding="utf-8") as f:
+                json.dump({"titles": all_titles, "date": report_date}, f, ensure_ascii=False, indent=2)
+            log.info(f"✅ 已保存去重库到 last_sent.json（{len(all_titles)} 条，含上期）")
+        except Exception as e:
+            log.warning(f"保存 last_sent.json 失败: {e}")
 
     if success:
         log.info("🎉 全流程完成！")
