@@ -1035,7 +1035,8 @@ def summarize_news(raw_results):
                                      "开发者体验"]
 
                 for item in parsed:
-                    text_blob = (item.get("title", "") + " " + item.get("summary", "")).lower()
+                    title_blob0 = (item.get("title", "") or "").lower()
+                    text_blob = title_blob0 + " " + (item.get("summary", "") or "").lower()
                     kw_track = _derive_track(text_blob)
                     if not kw_track:
                         # 标题摘要完全不含任何赛道关键词 → 判无关新闻
@@ -1043,22 +1044,29 @@ def summarize_news(raw_results):
                         item["_irrelevant"] = True
                         log.info(f"  无关新闻过滤: [{item.get('title','')[:30]}] → 强制0分")
                         continue
-                    # 赛道以关键词判定为准，LLM写的category只当兜底：
-                    # companies 写错会让后面的联网核查也跟着判错赛道。
-                    # 例外：关键词只落到「AI大模型」这个宽桶时不覆盖——LLM给的具体赛道
-                    # 是正文语义判断的结果，比宽桶关键词更精确（华为高通专利案踩过）
+                    # 赛道判定：只有标题里带赛道词才允许覆盖 LLM 写的 category。
+                    # 上一版用「标题+摘要」的关键词去改判，线上跑出了反例：
+                    # 「行业评论文章探讨智能体AI超级周期」因摘要顺带提到"机器人"被改成具身机器人，
+                    # 「傅里叶智能音频芯片港股大涨」因摘要提到"机器人"被从算力芯片改成具身机器人。
+                    # 正文提到 ≠ 这条新闻是关于它的；标题带词才是主题。
+                    # 摘要关键词退居两个位置：判相关性（上面的0分闸）+ LLM没给赛道时兜底补标。
                     cats = [c.strip() for c in (item.get("category", "") or "").split("、") if c.strip()]
-                    eff_track = kw_track
-                    if cats and cats[0] != kw_track:
-                        specific = {"算力芯片", "具身机器人", "无人机", "新型储能"}
-                        if kw_track == "AI大模型" and cats[0] in specific:
-                            eff_track = cats[0]
+                    llm_track = cats[0] if cats and cats[0] in TRACK_KWS else ""
+                    kw_title = _derive_track(title_blob0)
+                    specific = {"算力芯片", "具身机器人", "无人机", "新型储能"}
+                    chosen = kw_title or (kw_track if not llm_track else "")
+                    if chosen and chosen != llm_track:
+                        # 例外：关键词只落到「AI大模型」这个宽桶而 LLM 给了具体赛道时不覆盖——
+                        # 宽桶词面太泛（模型/算法/推理什么都能套），不如正文语义判断精确
+                        if chosen == "AI大模型" and llm_track in specific:
+                            chosen = llm_track
                         else:
-                            old = cats[0]
-                            cats = [kw_track] + [c for c in cats[1:] if c != old]
+                            old = cats[0] if cats else ""
+                            cats = [chosen] + [c for c in cats[1:] if c not in TRACK_KWS]
                             item["category"] = "、".join(cats)
-                            log.info(f"  赛道改判: [{item.get('title','')[:24]}] {old} → {kw_track}")
-                    item["_kw_track"] = eff_track
+                            log.info(f"  {'赛道改判' if llm_track else '赛道补标'}: "
+                                     f"[{item.get('title','')[:24]}] {old or '无'} → {chosen}")
+                    item["_kw_track"] = chosen or llm_track or kw_track
 
                     title_blob = (item.get("title", "") or "").lower()
                     low_hit = next((k for k in LOW_VALUE_KWS if k in title_blob), "")
