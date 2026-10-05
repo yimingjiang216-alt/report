@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ANTHROPIC_AUTH_TOKEN = os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("ANTHROPIC_API_KEY") or ""
-_base = os.environ.get("ANTHROPIC_BASE_URL") or os.environ.get("LLM_BASE_URL") or "https://pool.autelrobotics.com"
+_base = os.environ.get("ANTHROPIC_BASE_URL") or os.environ.get("LLM_BASE_URL") or "https://api.siliconflow.cn"
 _base = _base.rstrip("/")
 # 不同厂商端点路径不同：智谱是 /api/paas/v4，SiliconFlow/OpenAI 是 /v1
 # 如果 base_url 已含版本路径就不再加 /v1
