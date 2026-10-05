@@ -48,7 +48,7 @@ jobs:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           FEISHU_WEBHOOK_TEST: ${{ github.event.inputs.feishu_webhook_test }}
           TEST_MODE: ${{ github.event.inputs.feishu_webhook_test && '1' || '' }}
-          RSSHUB_URL: https://rsshub.rssforever.com
+          RSSHUB_URL: https://rsshub.bestblogs.dev
         run: python daily_news.py
 
       - name: Upload artifacts

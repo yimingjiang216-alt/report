@@ -2,7 +2,7 @@
 
 import os, sys, csv, json, re, time, logging, threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
@@ -32,7 +32,7 @@ RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 TO_EMAIL       = [e.strip() for e in os.environ.get("TO_EMAIL", "yimingjiang216@gmail.com").split(",") if e.strip()]
 FROM_EMAIL     = os.environ.get("FROM_EMAIL", "onboarding@resend.dev")
 CSV_PATH       = os.environ.get("CSV_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "媒体洞察调研看板_素材库_表格.csv"))
-RSSHUB_URL     = os.environ.get("RSSHUB_URL", "http://localhost:1200")  # 本地或公共RSSHub
+RSSHUB_URL     = os.environ.get("RSSHUB_URL", "https://rsshub.bestblogs.dev")  # 公共RSSHub镜像
 FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "https://open.feishu.cn/open-apis/bot/v2/hook/f2db3751-5063-4969-a732-54694a70731e")
 # 测试模式：只推飞书，不发邮件、不写 last_sent.json，手动试跑不污染正式去重库也不重复发信。
 # 测试模式绝不回退到正式群——没配 FEISHU_WEBHOOK_TEST 就一条都不发。
@@ -57,24 +57,24 @@ RSS_SOURCES = [
     ("Sam Altman",           "http://blog.samaltman.com/posts.atom",                                   5),
     ("Andrej Karpathy",      "https://karpathy.github.io/feed.xml",                                    5),
     ("Francois Chollet",     "https://medium.com/feed/@francois.chollet",                              4),
-    ("Marc Andreessen",      "https://pmarca.substack.com/feed",                                       5),
     ("Stratechery",          "https://stratechery.com/feed/",                                          5),
     ("Benedict Evans",       "https://www.ben-evans.com/benedictevans/rss.xml",                        4),
     ("Y Combinator",         "https://www.ycombinator.com/blog/rss",                                   4),
     ("量子位",               "https://www.qbitai.com/feed",                                            5),
     ("极客公园",             "https://www.geekpark.net/rss",                                           5),
-    ("虎嗅",                 f"{RSSHUB_URL}/huxiu/article",                                           5),
-    ("晚点LatePost",         "https://feeds.feedburner.com/latepost",                                  5),
-    ("36氪",                 "https://36kr.com/feed",                                                  4),
+    ("虎嗅",                 f"{RSSHUB_URL}/huxiu/article",                                           4),
     ("少数派",               "https://sspai.com/feed",                                                 4),
     ("InfoQ",                "https://www.infoq.cn/feed",                                              4),
-    ("AI科技大本营",         "https://blog.csdn.net/dQCFKyQDXYm3F8rB0/rss/list",                      3),
     ("钛媒体",               "https://www.tmtpost.com/rss",                                            4),
     ("爱范儿",               "https://www.ifanr.com/feed",                                             3),
     ("雷峰网",               "https://www.leiphone.com/feed",                                          3),
     ("新浪科技",             "https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2509&k=&num=50&page=1", 3),
+    ("IT之家",               "https://www.ithome.com/rss/",                                            4),
+    ("cnBeta",               "https://www.cnbeta.com.tw/backend.php",                                  3),
     ("TechCrunch AI",        "https://techcrunch.com/category/artificial-intelligence/feed/",          4),
-    ("VentureBeat",          "https://venturebeat.com/feed/",                                          4),
+    ("Engadget",             "https://www.engadget.com/rss.xml",                                       3),
+    ("The Decoder",          "https://the-decoder.com/feed/",                                          4),
+    ("Interesting Engineering","https://interestingengineering.com/rss",                               3),
     ("MIT Tech Review",      "https://www.technologyreview.com/feed/",                                 4),
     ("Wired AI",             "https://www.wired.com/feed/category/artificial-intelligence/rss",        3),
     ("Ars Technica AI",      "https://feeds.arstechnica.com/arstechnica/technology-lab",               3),
@@ -82,12 +82,12 @@ RSS_SOURCES = [
     ("IEEE Spectrum AI",     "https://spectrum.ieee.org/feeds/topic/artificial-intelligence.rss",      4),
     ("Science Daily AI",     "https://www.sciencedaily.com/rss/computers_math/artificial_intelligence.xml", 3),
     ("Towards Data Science", "https://towardsdatascience.com/feed",                                    3),
-    ("Analytics Vidhya",     "https://www.analyticsvidhya.com/blog/feed/",                            3),
 
     # == 无人机 ==
     ("Drone DJ",             "https://dronedj.com/feed/",                                             5),
     ("Drone Life",           "https://dronelife.com/feed/",                                           4),
-    ("sUAS News",            "https://www.suasnews.com/feed/",                                        4),
+    ("The War Zone",         "https://www.thedrive.com/the-war-zone/feed",                             4),
+    ("DroneXL",              "https://dronexl.co/feed/",                                               4),
 
     # == 具身机器人 / 人形机器人 ==
     ("The Robot Report",     "https://www.therobotreport.com/feed/",                                  5),
@@ -99,45 +99,58 @@ RSS_SOURCES = [
     ("EE Times",             "https://www.eetimes.com/feed/",                                         4),
     ("Semiconductor Digest", "https://www.semiconductor-digest.com/feed/",                            4),
     ("Tom's Hardware",       "https://www.tomshardware.com/feeds/all",                                3),
+    ("ServeTheHome",         "https://www.servethehome.com/feed/",                                    4),
+    ("SemiWiki",             "https://semiwiki.com/feed/",                                            3),
+    ("Blocks & Files",       "https://blocksandfiles.com/feed/",                                      3),
 
     # == 新型电池 / 硬科技 ==
     ("Electrek",             "https://electrek.co/feed/",                                             4),
     ("CleanTechnica",        "https://cleantechnica.com/feed/",                                       4),
     ("Ars Technica Hardware","https://feeds.arstechnica.com/arstechnica/gadgets",                     3),
+    ("Energy Storage News",  "https://www.energy-storage.news/feed/",                                 4),
+    ("PV Magazine",          "https://www.pv-magazine.com/feed/",                                     3),
+    ("InsideEVs",            "https://www.insideevs.com/feed/",                                       3),
+    ("The Drive",            "https://www.thedrive.com/feed/",                                        3),
 
-    # == 新增：AI 巨头官方 Blog ==
+    # == AI 巨头官方 Blog ==
     ("The Information",      "https://www.theinformation.com/feed",                                  5),
     ("Platformer",           "https://www.platformer.news/rss/",                                     4),
     ("Anthropic Blog",       "https://rsshub.bestblogs.dev/anthropic/news",                          5),
     ("Meta Engineering",     "https://engineering.fb.com/feed/",                                     5),
     ("AWS AI Blog",          "https://aws.amazon.com/blogs/machine-learning/feed/",                  4),
-    ("DeepMind Substack",    "https://deepmind.substack.com/feed",                                   5),
     ("ARM Blog",             "https://community.arm.com/arm-community-blogs/rss",                    4),
+    ("Interconnects",        "https://www.interconnects.ai/feed",                                    4),
 
-    # == 新增：芯片深度分析 ==
+    # == 芯片深度分析 ==
     ("Semiconductor Engineering", "https://semiengineering.com/feed/",                               4),
 
-    # == 新增：机器人学术 ==
+    # == 机器人学术 ==
     ("IEEE RAS",             "https://www.ieee-ras.org/rss",                                         4),
 
     # == AI 聚合日报（通过 RSS，主力用 fetch_aihot_api 补充）==
     ("AIHOT AI日报",         "https://aihot.virxact.com/rss",                                         5),
 
-    # == 本地 RSSHub 关键词搜索（覆盖五大赛道）==
-    ("36氪-大模型",          f"{RSSHUB_URL}/36kr/search/items/大模型",                               5),
-    ("36氪-具身机器人",      f"{RSSHUB_URL}/36kr/search/items/具身机器人",                           5),
-    ("36氪-无人机",          f"{RSSHUB_URL}/36kr/search/items/无人机",                               5),
-    ("36氪-算力芯片",        f"{RSSHUB_URL}/36kr/search/items/算力芯片",                             5),
-    ("36氪-新型电池",        f"{RSSHUB_URL}/36kr/search/items/固态电池",                             4),
-    ("虎嗅-AI",              f"{RSSHUB_URL}/huxiu/search/AI",                                        5),
-    ("虎嗅-机器人",          f"{RSSHUB_URL}/huxiu/search/机器人",                                    4),
-    ("虎嗅-无人机",          f"{RSSHUB_URL}/huxiu/search/无人机",                                    4),
+    # == RSSHub 关键词搜索（覆盖五大赛道；权重压低，让一手源在同窗口内优先占名额）==
+    ("36氪-大模型",          f"{RSSHUB_URL}/36kr/search/items/大模型",                               3),
+    ("36氪-具身机器人",      f"{RSSHUB_URL}/36kr/search/items/具身机器人",                           3),
+    ("36氪-人形机器人",      f"{RSSHUB_URL}/36kr/search/items/人形机器人",                           3),
+    ("36氪-无人机",          f"{RSSHUB_URL}/36kr/search/items/无人机",                               3),
+    ("36氪-算力芯片",        f"{RSSHUB_URL}/36kr/search/items/算力芯片",                             3),
+    ("36氪-新型电池",        f"{RSSHUB_URL}/36kr/search/items/固态电池",                             3),
+    ("虎嗅-AI",              f"{RSSHUB_URL}/huxiu/search/AI",                                        3),
+    ("虎嗅-机器人",          f"{RSSHUB_URL}/huxiu/search/机器人",                                    3),
+    ("虎嗅-无人机",          f"{RSSHUB_URL}/huxiu/search/无人机",                                    3),
+    ("虎嗅-芯片",            f"{RSSHUB_URL}/huxiu/search/芯片",                                      3),
 ]
 
 JINA_MAX_CHARS = 3000   # Jina 抓取正文的上限
 LLM_CONTENT_CHARS = 3000  # 送 LLM 时每篇截断上限（与抓取一致，不额外截断）
 RSS_PER_SOURCE = 6  # 每天跑一次，每源取6条确保覆盖充分
 JINA_DELAY_SEC = 0.2  # 每线程抓取前的小睡；并行5路下0.2秒足够防429
+FRESH_WINDOW_DAYS = 2   # 采样阶段就丢弃超过这个天数的文章，避免旧文占满名额
+RSS_CANDIDATE_MAX = 30  # 送 Jina/LLM 的 RSS 素材上限（全部为窗口内新鲜文章）
+AIHOT_MATERIAL_MAX = 10 # aihot 聚合源补充的素材上限
+LLM_EVENT_MAX = 22      # 单次 LLM 输出的事件条数上限，防正文生成被 max_tokens 截断
 
 CATEGORY_COLORS = {
     # 赛道标签
@@ -191,6 +204,54 @@ def _host_semaphore(url):
     return sem
 
 
+def _xml_root(content):
+    """严格解析；仅在失败时宽松重试一次（常见坏源：正文里裸 & 没转义）"""
+    try:
+        return ET.fromstring(content)
+    except ET.ParseError:
+        text = content.decode("utf-8", "ignore")
+        fixed = re.sub(r"&(?!(?:[A-Za-z][A-Za-z0-9]{1,10}|#\d{1,5}|#x[0-9A-Fa-f]{1,4});)",
+                       "&amp;", text)
+        return ET.fromstring(fixed.encode("utf-8"))
+
+
+def _to_utc(pub_str):
+    """把 RSS/Atom 的发布时间统一成 UTC 字符串，避免源所在时区让文章看起来提前一天过期"""
+    try:
+        dt = parsedate_to_datetime(pub_str)
+    except Exception:
+        return ""
+    if dt is None:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+
+def _pub_utc_str(art):
+    """取文章的 UTC 发布时间（%Y-%m-%d %H:%M），取不到返回 ''"""
+    for k in ("pub_utc", "pub", "pub_date", "published"):
+        v = (str(art.get(k) or "")).strip()[:16].replace("T", " ").replace("/", "-")
+        if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$", v):
+            return v
+        v2 = v[:10]
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", v2):
+            return v2 + " 00:00"
+    return ""
+
+
+def _age_hours(art):
+    """距今小时数；无时间信息的给一个极大值，排在最后而不是被丢掉"""
+    v = _pub_utc_str(art)
+    if not v:
+        return 1e9
+    try:
+        dt = datetime.strptime(v, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return 1e9
+    return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600)
+
+
 def _fetch_rss(source_name, rss_url, max_items):
     try:
         resp = None
@@ -211,7 +272,7 @@ def _fetch_rss(source_name, rss_url, max_items):
         stripped = text.strip()
         if stripped.startswith("{"):
             return _fetch_rss_json(source_name, stripped, max_items)
-        root = ET.fromstring(resp.content)
+        root = _xml_root(resp.content)
         results = []
         # 兼容 RSS(<item>) 和 Atom(<entry>)，忽略命名空间（Atom 带 xmlns，直接用 tag 名匹配不到）
         def _localname(tag):
@@ -246,7 +307,8 @@ def _fetch_rss(source_name, rss_url, max_items):
             except Exception:
                 pub_readable = pub_str[:16]
             results.append({"title": title, "url": link, "rss_summary": desc[:300],
-                             "content": "", "pub": pub_readable, "source": source_name, "author": ""})
+                             "content": "", "pub": pub_readable, "pub_utc": _to_utc(pub_str),
+                             "source": source_name, "author": ""})
         return results
     except Exception as e:
         log.warning(f"RSS fetch failed [{source_name}]: {e}")
@@ -271,12 +333,15 @@ def _fetch_rss_json(source_name, json_text, max_items):
                 continue
             # 时间戳转可读
             pub_readable = ""
+            pub_utc = ""
             try:
-                pub_readable = datetime.fromtimestamp(int(ctime)).strftime("%Y-%m-%d %H:%M")
+                pub_readable = datetime.fromtimestamp(int(ctime), timezone.utc).strftime("%Y-%m-%d %H:%M")
+                pub_utc = pub_readable
             except Exception:
                 pub_readable = str(ctime)[:16]
             results.append({"title": title, "url": link, "rss_summary": summary[:300],
-                             "content": "", "pub": pub_readable, "source": source_name, "author": author})
+                             "content": "", "pub": pub_readable, "pub_utc": pub_utc,
+                             "source": source_name, "author": author})
         return results
     except Exception as e:
         log.warning(f"JSON feed failed [{source_name}]: {e}")
@@ -321,6 +386,10 @@ def _fetch_fulltext_jina(url):
 
 def search_news():
     all_articles, seen = [], set()
+    # 采样阶段就按发布时间筛掉旧文：官方博客几天不更新是常态，
+    # 让它们占满名额会导致最终素材只剩十几条
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=FRESH_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    dropped_stale = 0
     # 8路并行拉取；按 RSS_SOURCES 原始顺序收结果，保证与串行版输出完全一致
     with ThreadPoolExecutor(max_workers=8) as ex:
         futures = [ex.submit(_fetch_rss, name, url, RSS_PER_SOURCE)
@@ -332,13 +401,18 @@ def search_news():
             except Exception:
                 arts = []
             for art in arts:
+                pub_day = _pub_utc_str(art)[:10]
+                if pub_day and pub_day < cutoff:
+                    dropped_stale += 1
+                    continue
                 key = re.sub(r"\s+", "", art["title"])[:30]
                 if key and key not in seen:
                     seen.add(key)
                     art["weight"] = weight
+                    art["_age_h"] = _age_hours(art)
                     all_articles.append(art)
 
-    log.info(f"RSS 共拉取 {len(all_articles)} 篇（去重后）")
+    log.info(f"RSS 共拉取 {len(all_articles)} 篇（去重后，丢弃{dropped_stale}篇 {FRESH_WINDOW_DAYS} 天以外的旧文）")
     if not all_articles:
         return [], []
 
@@ -364,20 +438,37 @@ def search_news():
             buckets["AI通用"].append(art)
 
     # 每个非AI赛道按weight排序取最多5条，AI通用取剩余名额
+    # 同权重内按「文章更新」排序，确保名额给最新的那批而不是几天前的；
+    # 单源最多贡献 PER_SOURCE_CAP 条，避免一个聚合媒体吃满名额、一手源进不来
     candidates = []
     TRACK_QUOTA = 5
+    PER_SOURCE_CAP = 3
+
+    def _take(bucket, n):
+        picked, per = [], {}
+        for art in bucket:
+            s = art.get("source", "")
+            if per.get(s, 0) >= PER_SOURCE_CAP:
+                continue
+            per[s] = per.get(s, 0) + 1
+            picked.append(art)
+            if len(picked) >= n:
+                break
+        return picked
+
     for track in ["无人机", "机器人", "芯片", "电池储能"]:
-        bucket = sorted(buckets[track], key=lambda x: x.get("weight", 1), reverse=True)
-        taken = bucket[:TRACK_QUOTA]
+        bucket = sorted(buckets[track], key=lambda x: (-x.get("weight", 1), x.get("_age_h", 1e9)))
+        taken = _take(bucket, TRACK_QUOTA)
         candidates.extend(taken)
         if taken:
             log.info(f"  赛道[{track}] 取 {len(taken)} 篇（共 {len(bucket)} 篇可选）")
 
-    # AI通用取剩余名额，总数上限40条
-    remaining_quota = max(40 - len(candidates), 20)
-    ai_sorted = sorted(buckets["AI通用"], key=lambda x: x.get("weight", 1), reverse=True)
-    candidates.extend(ai_sorted[:remaining_quota])
-    log.info(f"  赛道[AI通用] 取 {min(remaining_quota, len(ai_sorted))} 篇（共 {len(ai_sorted)} 篇可选）")
+    # AI通用补足到 RSS_CANDIDATE_MAX
+    remaining_quota = max(RSS_CANDIDATE_MAX - len(candidates), 10)
+    ai_sorted = sorted(buckets["AI通用"], key=lambda x: (-x.get("weight", 1), x.get("_age_h", 1e9)))
+    ai_taken = _take(ai_sorted, remaining_quota)
+    candidates.extend(ai_taken)
+    log.info(f"  赛道[AI通用] 取 {len(ai_taken)} 篇（共 {len(ai_sorted)} 篇可选）")
     log.info(f"开始 Jina 抓取 {len(candidates)} 篇正文（5路并行）...")
 
     def _fill_fulltext(art):
@@ -652,6 +743,8 @@ def summarize_news(raw_results):
 - 每个独立事件都必须输出一条，即使你认为不重要也要打低分(1-3分)输出，不得遗漏任何独立事件
 - 输出条目数通常在10-20条之间。如果你只输出了不到10条，说明你合并过度，请回头检查是否漏掉了独立事件
 - 例：OpenAI发布模型 vs OpenAI首席科学家发文 vs OpenAI承认安全事件 = 3个不同事件，必须输出3条
+- 硬上限：最多输出{LLM_EVENT_MAX}条。若独立事件多于{LLM_EVENT_MAX}个，按重要度保留前{LLM_EVENT_MAX}个、其余整条丢弃；
+  绝不允许为了压到{LLM_EVENT_MAX}条而把不同事件合并成一条（合并只适用于同一事件的多篇报道）
 
 【输出要求】
 对合并后的每个独立事件输出：
@@ -873,7 +966,7 @@ def summarize_news(raw_results):
                 # LLM打绝对分尺度漂移（同日可能给十几条9分），但相对比较稳定。
                 # 用高分shortlist做「谁胜过谁」的排序，替代按绝对分开榜；
                 # 调用失败或格式异常则退回阶段A的分数排序，不影响出报。
-                COMPARE_N = 15
+                COMPARE_N = 20
                 shortlist = [it for it in stage_a_sorted if int(it.get("score", 0) or 0) > 0][:COMPARE_N]
                 all_sorted = stage_a_sorted
                 if len(shortlist) >= 3:
@@ -1617,7 +1710,7 @@ def main():
     raw_results, _ = search_news()
 
     log.info("【Step 1b】调用 aihot API 获取 AI 精选动态...")
-    aihot_results = fetch_aihot_api(limit=30)
+    aihot_results = fetch_aihot_api(limit=AIHOT_MATERIAL_MAX)
     if aihot_results:
         raw_results = raw_results + aihot_results
         log.info(f"合并 aihot 后共 {len(raw_results)} 篇素材")
@@ -1630,23 +1723,22 @@ def main():
         log.error("无结果，退出")
         sys.exit(1)
 
-    # ── 过滤旧文章：只保留最近2天（每天跑，2天窗口足够；更久的一律丢弃） ──
-    cutoff = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+    # ── 过滤旧文章：只保留最近 FRESH_WINDOW_DAYS 天（RSS 采样阶段已筛过一遍，这里兜底 aihot 等补充源） ──
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=FRESH_WINDOW_DAYS)).strftime("%Y-%m-%d")
     fresh_results = []
     dropped_unknown = 0
     dropped_old = 0
     for item in raw_results:
-        # 统一从 pub / pub_date / published 三个字段拿时间
-        pub = item.get("pub") or item.get("pub_date") or item.get("published") or ""
-        pub_clean = (pub or "").strip()[:10].replace("T", " ").replace("/", "-")
-        # 只认形如 YYYY-MM-DD 的合法日期
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$", pub_clean):
-            # 时间缺失/格式异常的，谨慎处理：丢弃，避免把旧闻当新闻
+        # 统一从 pub_utc / pub / pub_date / published 拿时间，并按 UTC 归一
+        pub_clean = _pub_utc_str(item)[:10]
+        # 时间缺失/格式异常的，谨慎处理：丢弃，避免把旧闻当新闻
+        if not pub_clean:
             dropped_unknown += 1
             continue
         if pub_clean < cutoff:
             dropped_old += 1
             continue
+        item.setdefault("_age_h", _age_hours(item))
         fresh_results.append(item)
     log.info(f"过滤旧文章: {len(raw_results)} → {len(fresh_results)} 篇（丢弃{dropped_old}条过期、{dropped_unknown}条无时间）")
     raw_results = fresh_results
