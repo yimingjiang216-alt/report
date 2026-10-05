@@ -824,7 +824,8 @@ def call_llm(messages):
                         if frag:
                             if t_first is None:
                                 # TTFT=首块到达；它与 t_conn 的差就是 prefill（吃prompt）耗时
-                                log.info(f"  LLM打点: 建连{t_conn - t_start:.0f}s → 首token{time.time() - t_start:.0f}s")
+                                t_first = time.time()
+                                log.info(f"  LLM打点: 建连{t_conn - t_start:.0f}s → 首token{t_first - t_start:.0f}s")
                             parts.append(frag)
                             n_chunks += 1
                 resp.close()
@@ -1477,12 +1478,16 @@ def summarize_news(raw_results):
                             for it in removed:
                                 for c in _get_company(it):
                                     company_count[c] = max(0, company_count.get(c, 0) - 1)
+                                if it.get("_offtopic_landmark"):
+                                    ad_used = max(0, ad_used - 1)
                                 u = (it.get("source_url", "") or "").strip()
                                 if u and u in used_urls:
                                     used_urls.discard(u)
                                 it["selected"] = False
                                 log.info(f"  跨期复核剔除: [{it.get('title','')[:30]}]")
                             # 补位：先只用非跨期重复条目；实在凑不满再允许旧闻补位
+                            # 与阶段1/2/3同口径：0分闸和自动驾驶限额在这条路径上同样生效，
+                            # 否则复核剔除的恰好是那条自动驾驶时，补位会放进第二条赛道外事件
                             for allow_dup in (False, True):
                                 for item in all_sorted:
                                     if len(final) >= 5:
@@ -1491,12 +1496,18 @@ def summarize_news(raw_results):
                                         continue
                                     if item.get("selected"):
                                         continue
+                                    if int(item.get("score", 0) or 0) <= 0:
+                                        continue
+                                    if item.get("_offtopic_landmark") and ad_used >= AD_MAX_PER_ISSUE:
+                                        continue
                                     if _is_same_event(item, final):
                                         continue
                                     if not allow_dup and _is_dup(item):
                                         continue
                                     item["selected"] = True
                                     final.append(item)
+                                    if item.get("_offtopic_landmark"):
+                                        ad_used += 1
                                     for c in _get_company(item):
                                         company_count[c] = company_count.get(c, 0) + 1
                                     iu = (item.get("source_url", "") or "").strip()
@@ -1513,20 +1524,24 @@ def summarize_news(raw_results):
                 # ── 联网核查兜底（仅最终selected的5条，含"AI大模型"且公司不明确时纠正赛道标签） ──
                 for item in parsed:
                     if item.get("selected") is True and "AI大模型" in item.get("category", ""):
-                        company = (item.get("companies", "") or "").split("、")[0].split(",")[0].strip()
-                        if company:
+                        # 逐条公司查：「腾讯租甲骨文算力」只查腾讯会漏判甲骨文，
+                        # 任一家公司的检索文本命中具体赛道就纠正标签
+                        for company in _get_company(item):
+                            if not company:
+                                continue
                             search_text = web_search_company(company)
-                            if search_text:
-                                for track, keywords in TRACK_KEYWORDS.items():
-                                    if any(k in search_text for k in keywords):
-                                        cats = [c.strip() for c in item["category"].split("、") if c.strip()]
-                                        if track not in cats:
-                                            cats.insert(0, track)
-                                            if track != "AI大模型":
-                                                cats = [c for c in cats if c != "AI大模型"]
-                                            item["category"] = "、".join(cats)
-                                            log.info(f"  联网核查: {company} → {item['category']}")
-                                        break
+                            if not search_text:
+                                continue
+                            for track, keywords in TRACK_KEYWORDS.items():
+                                if any(k in search_text for k in keywords):
+                                    cats = [c.strip() for c in item["category"].split("、") if c.strip()]
+                                    if track not in cats:
+                                        cats.insert(0, track)
+                                        if track != "AI大模型":
+                                            cats = [c for c in cats if c != "AI大模型"]
+                                        item["category"] = "、".join(cats)
+                                        log.info(f"  联网核查: {company} → {item['category']}")
+                                    break
 
                 # ── 出口质量检查：强制修正标题/摘要/URL ──
                 seen_urls = set()
