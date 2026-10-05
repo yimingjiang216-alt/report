@@ -1002,16 +1002,22 @@ def summarize_news(raw_results):
                         item["_irrelevant"] = True
                         log.info(f"  无关新闻过滤: [{item.get('title','')[:30]}] → 强制0分")
                         continue
-                    item["_kw_track"] = kw_track
-
                     # 赛道以关键词判定为准，LLM写的category只当兜底：
-                    # companies 写错会让后面的联网核查也跟着判错赛道
+                    # companies 写错会让后面的联网核查也跟着判错赛道。
+                    # 例外：关键词只落到「AI大模型」这个宽桶时不覆盖——LLM给的具体赛道
+                    # 是正文语义判断的结果，比宽桶关键词更精确（华为高通专利案踩过）
                     cats = [c.strip() for c in (item.get("category", "") or "").split("、") if c.strip()]
+                    eff_track = kw_track
                     if cats and cats[0] != kw_track:
-                        old = cats[0]
-                        cats = [kw_track] + [c for c in cats[1:] if c != old]
-                        item["category"] = "、".join(cats)
-                        log.info(f"  赛道改判: [{item.get('title','')[:24]}] {old} → {kw_track}")
+                        specific = {"算力芯片", "具身机器人", "无人机", "新型储能"}
+                        if kw_track == "AI大模型" and cats[0] in specific:
+                            eff_track = cats[0]
+                        else:
+                            old = cats[0]
+                            cats = [kw_track] + [c for c in cats[1:] if c != old]
+                            item["category"] = "、".join(cats)
+                            log.info(f"  赛道改判: [{item.get('title','')[:24]}] {old} → {kw_track}")
+                    item["_kw_track"] = eff_track
 
                     title_blob = (item.get("title", "") or "").lower()
                     low_hit = next((k for k in LOW_VALUE_KWS if k in title_blob), "")
@@ -1050,6 +1056,8 @@ def summarize_news(raw_results):
                         cmp_text = call_llm([
                             {"role": "system", "content": "你是科技产业简报的终审编辑，擅长相对比较。只输出严格JSON数组，不含任何说明文字。"},
                             {"role": "user", "content": f"""下面是本期评分靠前的 {len(shortlist)} 条候选（index 为候选序号）。
+
+{sl_prompt_items}
 
 请做**相对比较**，不要重新打分：决出最值得发给读者的前5条，并给出全部 {len(shortlist)} 条的完整排序。
 
