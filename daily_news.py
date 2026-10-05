@@ -312,7 +312,9 @@ def apply_item_rules(parsed):
             continue
         cap_low_value(item)
 LLM_READ_TIMEOUT = 300   # 流式下两次收到数据之间的最大空档（含首token等待）
-LLM_RETRY_DEADLINE = 900 # 单次 LLM 调用（含全部重试）的时间预算，超时直接失败
+# 单次 LLM 调用（含全部重试）的时间预算。实测单次生成 383s（午）/ 788s（早高峰），
+# 900s 在早高峰已吃掉 87%，再慢就被掐断走步骤级重跑。抬到 1200s 留足上游拥塞余量。
+LLM_RETRY_DEADLINE = 1200
 
 CATEGORY_COLORS = {
     # 赛道标签
