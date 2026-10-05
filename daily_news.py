@@ -1,9 +1,10 @@
 """Daily tech news digest - auto fetch, summarize and email."""
 
-import os, sys, csv, json, re, time, logging
+import os, sys, csv, json, re, time, logging, threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
+from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 import requests
 
@@ -170,9 +171,34 @@ def _is_digest_title(title):
     return False
 
 
+# 同一 host 最多同时在途请求数（防 rsshub 镜像这类公共实例被并发打挂返回429）
+PER_HOST_LIMIT = 2
+_host_semaphores = {}
+_host_semaphores_lock = threading.Lock()
+
+def _host_semaphore(url):
+    host = urlparse(url).netloc or url
+    with _host_semaphores_lock:
+        sem = _host_semaphores.get(host)
+        if sem is None:
+            sem = _host_semaphores[host] = threading.Semaphore(PER_HOST_LIMIT)
+    return sem
+
+
 def _fetch_rss(source_name, rss_url, max_items):
     try:
-        resp = requests.get(rss_url, headers=_HTTP_HEADERS, timeout=15)
+        resp = None
+        for attempt in range(2):  # 429/503限流时睡3秒重试一次
+            with _host_semaphore(rss_url):
+                r = requests.get(rss_url, headers=_HTTP_HEADERS, timeout=15)
+            if r.status_code in (429, 503) and attempt == 0:
+                log.warning(f"RSS 限流 [{source_name}]，3秒后重试")
+                time.sleep(3)
+                continue
+            resp = r
+            break
+        if resp is None:
+            return []
         resp.raise_for_status()
         text = resp.text
         # 新浪等接口返回JSON而非RSS，检测"{"开头
@@ -264,11 +290,12 @@ BLOG_SOURCES = [
 
 def _fetch_fulltext_jina(url):
     try:
-        resp = requests.get(
-            f"https://r.jina.ai/{url}",
-            headers={**_HTTP_HEADERS, "Accept": "text/plain", "X-Return-Format": "text", "X-Timeout": "15"},
-            timeout=25,
-        )
+        with _host_semaphore("https://r.jina.ai"):  # 与其他源共用按host限流，防免费额度被并发打爆
+            resp = requests.get(
+                f"https://r.jina.ai/{url}",
+                headers={**_HTTP_HEADERS, "Accept": "text/plain", "X-Return-Format": "text", "X-Timeout": "15"},
+                timeout=25,
+            )
         if resp.status_code == 200:
             lines = resp.text.strip().splitlines()
             body, author, skip = [], "", True
@@ -1029,7 +1056,13 @@ def summarize_news(raw_results):
 
 判断标准：只要核心事件是同一件事就算重复——即使措辞、角度、详略完全不同。例如往期"OpenAI承认智能体入侵政府网站并高额投入调查"与本期"OpenAI每日超50万美元调查智能体攻击事件"是同一件事（都是OpenAI智能体攻击事件及其调查），必须判重复。反过来，同一公司的不同事件（发新模型 vs 发安全报告）不算重复。
 
-严格输出JSON数组：本期哪些 index 与往期重复，形如 [{{"index":1,"dup_of":2}}]。没有重复则输出 []。"""},
+对每条疑似重复的，标注置信度：
+- "确定"：就是同一件事，无悬念（典型：同一事件的不同措辞/角度/跟进报道）
+- "疑似"：有点像但不敢肯定（典型：同公司同领域、时间接近，但无法确认是同一事件）
+
+拿不准时一律标"疑似"，只有无悬念时才标"确定"。
+
+严格输出JSON数组：本期哪些 index 与往期重复，形如 [{{"index":1,"dup_of":2,"level":"确定"}}]。没有重复则输出 []。"""},
                         ])
                         vt = verdict_text.strip().replace("```json", "").replace("```", "").strip()
                         vs, ve = vt.find("["), vt.rfind("]")
@@ -1037,9 +1070,15 @@ def summarize_news(raw_results):
                         if vs != -1 and ve > vs:
                             for verdict in json.loads(vt[vs:ve + 1]):
                                 try:
-                                    dup_indices.add(int(verdict.get("index", 0)) - 1)
+                                    vi = int(verdict.get("index", 0)) - 1
                                 except (ValueError, TypeError):
                                     continue
+                                if not (0 <= vi < len(final)):
+                                    continue
+                                if str(verdict.get("level", "")).strip() == "确定":
+                                    dup_indices.add(vi)
+                                else:
+                                    log.info(f"  跨期复核疑似(保留): [{final[vi].get('title','')[:30]}]")
                         if dup_indices:
                             removed = [final[i] for i in sorted(dup_indices) if 0 <= i < len(final)]
                             final = [it for i, it in enumerate(final) if i not in dup_indices]
