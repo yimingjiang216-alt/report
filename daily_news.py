@@ -1,6 +1,7 @@
 """Daily tech news digest - auto fetch, summarize and email."""
 
 import os, sys, csv, json, re, time, logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree as ET
@@ -129,7 +130,7 @@ RSS_SOURCES = [
 JINA_MAX_CHARS = 3000   # Jina 抓取正文的上限
 LLM_CONTENT_CHARS = 3000  # 送 LLM 时每篇截断上限（与抓取一致，不额外截断）
 RSS_PER_SOURCE = 6  # 每天跑一次，每源取6条确保覆盖充分
-JINA_DELAY_SEC = 1.0
+JINA_DELAY_SEC = 0.2  # 每线程抓取前的小睡；并行5路下0.2秒足够防429
 
 CATEGORY_COLORS = {
     # 赛道标签
@@ -287,14 +288,22 @@ def _fetch_fulltext_jina(url):
 
 def search_news():
     all_articles, seen = [], set()
-    for source_name, rss_url, weight in RSS_SOURCES:
-        log.info(f"拉取 RSS: {source_name}")
-        for art in _fetch_rss(source_name, rss_url, RSS_PER_SOURCE):
-            key = re.sub(r"\s+", "", art["title"])[:30]
-            if key and key not in seen:
-                seen.add(key)
-                art["weight"] = weight
-                all_articles.append(art)
+    # 8路并行拉取；按 RSS_SOURCES 原始顺序收结果，保证与串行版输出完全一致
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = [ex.submit(_fetch_rss, name, url, RSS_PER_SOURCE)
+                   for name, url, weight in RSS_SOURCES]
+        for (source_name, rss_url, weight), fut in zip(RSS_SOURCES, futures):
+            log.info(f"拉取 RSS: {source_name}")
+            try:
+                arts = fut.result()
+            except Exception:
+                arts = []
+            for art in arts:
+                key = re.sub(r"\s+", "", art["title"])[:30]
+                if key and key not in seen:
+                    seen.add(key)
+                    art["weight"] = weight
+                    all_articles.append(art)
 
     log.info(f"RSS 共拉取 {len(all_articles)} 篇（去重后）")
     if not all_articles:
@@ -336,16 +345,20 @@ def search_news():
     ai_sorted = sorted(buckets["AI通用"], key=lambda x: x.get("weight", 1), reverse=True)
     candidates.extend(ai_sorted[:remaining_quota])
     log.info(f"  赛道[AI通用] 取 {min(remaining_quota, len(ai_sorted))} 篇（共 {len(ai_sorted)} 篇可选）")
-    log.info(f"开始 Jina 抓取 {len(candidates)} 篇正文...")
+    log.info(f"开始 Jina 抓取 {len(candidates)} 篇正文（5路并行）...")
 
-    for i, art in enumerate(candidates):
-        log.info(f"  ({i+1}/{len(candidates)}): {art['title'][:50]}")
+    def _fill_fulltext(art):
+        time.sleep(JINA_DELAY_SEC)  # 每线程发起前小睡，礼貌限速防429
         text, author = _fetch_fulltext_jina(art["url"])
         art["content"] = text if text else art.get("rss_summary", "")
         art["author"]  = author
-        log.info(f"    {'✓' if text else '↓'} {len(art['content'])} 字")
-        if i < len(candidates) - 1:
-            time.sleep(JINA_DELAY_SEC)
+        return art, bool(text)
+
+    # map按提交顺序返回，日志编号与原串行版一致
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        for i, (art, got_text) in enumerate(ex.map(_fill_fulltext, candidates)):
+            log.info(f"  ({i+1}/{len(candidates)}): {art['title'][:50]}")
+            log.info(f"    {'✓' if got_text else '↓'} {len(art['content'])} 字")
 
     # 合集已在 _fetch_rss 入口用 _is_digest_title 过滤，无需在此拆分正文
 
@@ -990,6 +1003,78 @@ def summarize_news(raw_results):
                         item["selected"] = True
                         final.append(item)
                         log.info(f"  终极兜底: [{item.get('title','')[:30]}] (分{item.get('score','?')})")
+
+                # === 阶段4：跨期语义去重复核（LLM终审） ===
+                # bigram只能拦字面几乎一样的重复；同一事件换个说法连发三天的情况
+                # （如"OpenAI承认智能体入侵政府网站"→"OpenAI每日超50万美元调查智能体攻击"）
+                # 只能靠LLM识别，选完后再做一轮强制核对，命中即剔除并补位。
+                if final and prev_titles_raw:
+                    try:
+                        prev_list_str = json.dumps(
+                            [{"序号": i + 1, "标题": t} for i, t in enumerate(prev_titles_raw)],
+                            ensure_ascii=False)
+                        cand_list_str = json.dumps(
+                            [{"index": i + 1, "title": it.get("title", ""), "summary": it.get("summary", "")}
+                             for i, it in enumerate(final)],
+                            ensure_ascii=False)
+                        verdict_text = call_llm([
+                            {"role": "system", "content": "你是新闻去重审核员，只判断两期内容是否报道同一事件。只输出严格JSON，不含任何说明文字。"},
+                            {"role": "user", "content": f"""以下是往期已发送的新闻标题，以及本期刚选出的候选条目（含摘要）。
+
+【往期已发送】
+{prev_list_str}
+
+【本期候选】
+{cand_list_str}
+
+判断标准：只要核心事件是同一件事就算重复——即使措辞、角度、详略完全不同。例如往期"OpenAI承认智能体入侵政府网站并高额投入调查"与本期"OpenAI每日超50万美元调查智能体攻击事件"是同一件事（都是OpenAI智能体攻击事件及其调查），必须判重复。反过来，同一公司的不同事件（发新模型 vs 发安全报告）不算重复。
+
+严格输出JSON数组：本期哪些 index 与往期重复，形如 [{{"index":1,"dup_of":2}}]。没有重复则输出 []。"""},
+                        ])
+                        vt = verdict_text.strip().replace("```json", "").replace("```", "").strip()
+                        vs, ve = vt.find("["), vt.rfind("]")
+                        dup_indices = set()
+                        if vs != -1 and ve > vs:
+                            for verdict in json.loads(vt[vs:ve + 1]):
+                                try:
+                                    dup_indices.add(int(verdict.get("index", 0)) - 1)
+                                except (ValueError, TypeError):
+                                    continue
+                        if dup_indices:
+                            removed = [final[i] for i in sorted(dup_indices) if 0 <= i < len(final)]
+                            final = [it for i, it in enumerate(final) if i not in dup_indices]
+                            removed_ids = {id(it) for it in removed}
+                            for it in removed:
+                                for c in _get_company(it):
+                                    company_count[c] = max(0, company_count.get(c, 0) - 1)
+                                u = (it.get("source_url", "") or "").strip()
+                                if u and u in used_urls:
+                                    used_urls.discard(u)
+                                it["selected"] = False
+                                log.info(f"  跨期复核剔除: [{it.get('title','')[:30]}]")
+                            # 补位：先只用非跨期重复条目；实在凑不满再允许旧闻补位
+                            for allow_dup in (False, True):
+                                for item in all_sorted:
+                                    if len(final) >= 5:
+                                        break
+                                    if id(item) in removed_ids:
+                                        continue
+                                    if item.get("selected"):
+                                        continue
+                                    if _is_same_event(item, final):
+                                        continue
+                                    if not allow_dup and _is_dup(item):
+                                        continue
+                                    item["selected"] = True
+                                    final.append(item)
+                                    for c in _get_company(item):
+                                        company_count[c] = company_count.get(c, 0) + 1
+                                    iu = (item.get("source_url", "") or "").strip()
+                                    if iu:
+                                        used_urls.add(iu)
+                                    log.info(f"  复核补位: [{item.get('title','')[:30]}]")
+                    except Exception as e:
+                        log.warning(f"  跨期复核失败（保留原选择）: {e}")
 
                 # 重组：selected在前，其余在后
                 rest = [it for it in all_sorted if not it.get("selected")]
