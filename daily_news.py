@@ -861,7 +861,65 @@ def summarize_news(raw_results):
                         item["score"] = int(item.get("score", 0))
                     except (ValueError, TypeError):
                         item["score"] = 0
-                all_sorted = sorted(parsed, key=lambda x: x.get("score", 0), reverse=True)
+                stage_a_sorted = sorted(parsed, key=lambda x: x.get("score", 0), reverse=True)
+
+                # ── 阶段B：比较式终审 ──
+                # LLM打绝对分尺度漂移（同日可能给十几条9分），但相对比较稳定。
+                # 用高分shortlist做「谁胜过谁」的排序，替代按绝对分开榜；
+                # 调用失败或格式异常则退回阶段A的分数排序，不影响出报。
+                COMPARE_N = 15
+                shortlist = [it for it in stage_a_sorted if int(it.get("score", 0) or 0) > 0][:COMPARE_N]
+                all_sorted = stage_a_sorted
+                if len(shortlist) >= 3:
+                    try:
+                        sl_prompt_items = json.dumps(
+                            [{"index": i + 1, "title": it.get("title", ""),
+                              "summary": (it.get("summary", "") or "")[:200],
+                              "key_point": (it.get("key_point", "") or "")[:150]}
+                             for i, it in enumerate(shortlist)],
+                            ensure_ascii=False)
+                        cmp_text = call_llm([
+                            {"role": "system", "content": "你是科技产业简报的终审编辑，擅长相对比较。只输出严格JSON数组，不含任何说明文字。"},
+                            {"role": "user", "content": f"""下面是本期评分靠前的 {len(shortlist)} 条候选（index 为候选序号）。
+
+请做**相对比较**，不要重新打分：决出最值得发给读者的前5条，并给出全部 {len(shortlist)} 条的完整排序。
+
+判断口径（按优先级）：
+1. 事实强度：有可验证数据/首次实现/官方文件 > 有具体动作 > 只有愿景和形容词
+2. 结构性影响：改变成本曲线、竞争壁垒、行业规则的程度
+3. 三个月后是否仍会被引用
+
+同一公司的多条，只保留其中最强的一条排在前面，其余往后排。
+
+严格输出JSON数组，覆盖全部 {len(shortlist)} 条候选，按推荐度降序：
+[{{"index":3,"final_rank":1,"reason":"胜过第7条：给出可验证的成功率而非PR口号"}}]
+不要输出任何其他文字。"""},
+                        ])
+                        ct = cmp_text.strip().replace("```json", "").replace("```", "").strip()
+                        cs, ce = ct.find("["), ct.rfind("]")
+                        ranked = []
+                        if cs != -1 and ce > cs:
+                            for v in json.loads(ct[cs:ce + 1]):
+                                try:
+                                    vi = int(v.get("index", 0)) - 1
+                                except (ValueError, TypeError):
+                                    continue
+                                if 0 <= vi < len(shortlist) and all(vi != r[0] for r in ranked):
+                                    ranked.append((vi, v.get("reason", "")))
+                        if len(ranked) >= len(shortlist) // 2:  # 至少排掉一半才采用，否则视为输出不可信
+                            # 模型没排到的，按阶段A顺序补在末尾，一条不丢
+                            missed = [i for i in range(len(shortlist)) if all(i != r[0] for r in ranked)]
+                            ordered_shortlist = [shortlist[i] for i, _ in ranked] + [shortlist[i] for i in missed]
+                            in_shortlist = {id(it) for it in ordered_shortlist}
+                            leftovers = [it for it in stage_a_sorted if id(it) not in in_shortlist]
+                            all_sorted = ordered_shortlist + leftovers
+                            log.info(f"  比较式终审采用：shortlist {len(shortlist)} 条重排，前3条 "
+                                     f"[{' / '.join(it.get('title','')[:20] for it in ordered_shortlist[:3])}]")
+                        else:
+                            log.warning(f"  比较式终审输出不完整（{len(ranked)}/{len(shortlist)}），退回分数排序")
+                    except Exception as e:
+                        log.warning(f"  比较式终审失败（退回分数排序）: {e}")
+
                 # 调试：输出排序后前8条
                 for _di, _d in enumerate(all_sorted[:8]):
                     _co = (_d.get("companies","") or "").split("、")[0].split(",")[0].strip().lower()
