@@ -160,13 +160,14 @@ FRESH_WINDOW_DAYS = 2   # 采样阶段就丢弃超过这个天数的文章，避
 
 # 一手新闻室的发布节奏是每周1~2条（实测最新一条距今 64~93 小时），统一按 48h 筛
 # 等于把它们全部筛掉——而这批源恰恰是唯一不能被二手报道替代的。
-# 给它们单独放宽到 7 天；媒体/聚合源保持 2 天，速度是它们唯一的优势。
+# 给它们单独放宽窗口；2026-10-05 她选定「要更像新闻」，从7天收到3天：
+# 代价是发布超过72小时的官方旧闻不再进简报，换整体时效更新鲜。
 SLOW_FRESH_WINDOWS = {
-    "NVIDIA Newsroom": 7,
-    "Google Research": 7,
-    "Microsoft OnTheIssues": 7,
-    "Samsung Newsroom": 7,
-    "SK hynix Newsroom": 7,
+    "NVIDIA Newsroom": 3,
+    "Google Research": 3,
+    "Microsoft OnTheIssues": 3,
+    "Samsung Newsroom": 3,
+    "SK hynix Newsroom": 3,
 }
 
 
