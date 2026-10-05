@@ -151,6 +151,8 @@ FRESH_WINDOW_DAYS = 2   # 采样阶段就丢弃超过这个天数的文章，避
 RSS_CANDIDATE_MAX = 30  # 送 Jina/LLM 的 RSS 素材上限（全部为窗口内新鲜文章）
 AIHOT_MATERIAL_MAX = 10 # aihot 聚合源补充的素材上限
 LLM_EVENT_MAX = 22      # 单次 LLM 输出的事件条数上限，防正文生成被 max_tokens 截断
+LLM_READ_TIMEOUT = 300   # 流式下两次收到数据之间的最大空档（含首token等待）
+LLM_RETRY_DEADLINE = 900 # 单次 LLM 调用（含全部重试）的时间预算，超时直接失败
 
 CATEGORY_COLORS = {
     # 赛道标签
@@ -592,18 +594,20 @@ def call_llm(messages):
     """
     调用大模型。为跨国网络做稳定性处理：
     - 每次重试都新建独立 Session（旧连接池可能已被污染/半死）
-    - 长连接超时 + 长读取超时
-    - 固定间隔快速重试（不递增等待），最多 8 次
-    - 连接失败时主动关闭旧 session 再重试
+    - 流式(SSE)读取：长生成时连接始终有数据，不会被读超时掐断（实测非流式
+      在34篇素材下两次挂满600秒读超时，直接吃光 job 时限）
+    - 重试受总时长上限约束，避免一个坏时段把整条流水线拖死
     """
     if not ANTHROPIC_AUTH_TOKEN:
         raise ValueError("ANTHROPIC_AUTH_TOKEN not set")
 
     max_retries = 8
+    t_start = time.time()
     payload = {
         "model": LLM_MODEL,
         "max_tokens": 16384,
         "messages": messages,
+        "stream": True,
     }
     headers = {"Authorization": f"Bearer {ANTHROPIC_AUTH_TOKEN}", "Content-Type": "application/json"}
     url = f"{LLM_BASE_URL}/chat/completions"
@@ -624,26 +628,60 @@ def call_llm(messages):
 
             resp = session.post(
                 url, headers=headers, json=payload,
-                timeout=(30, 600),          # 连接30秒、读取600秒
+                timeout=(30, LLM_READ_TIMEOUT),   # 连接30秒；流式下单次读取空档上限
+                stream=True,
             )
             resp.raise_for_status()
+            ctype = resp.headers.get("Content-Type", "")
+            if "event-stream" in ctype or "stream" in ctype:
+                resp.encoding = "utf-8"   # 不显式设置时 requests 可能按 ISO-8859-1 解，中文标题会乱码
+                parts, err = [], None
+                for line in resp.iter_lines(decode_unicode=True):
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(data)
+                    except ValueError:
+                        continue
+                    if obj.get("error"):
+                        err = obj["error"]
+                        break
+                    for ch in obj.get("choices", []) or []:
+                        frag = (ch.get("delta") or {}).get("content")
+                        if frag:
+                            parts.append(frag)
+                resp.close()
+                text = "".join(parts)
+                if err:
+                    raise RuntimeError(f"LLM 流式返回错误: {str(err)[:120]}")
+                if text.strip():
+                    return text
+                raise RuntimeError("LLM 流式返回空内容")
+            # 服务端忽略 stream 参数时按普通JSON解析
             return resp.json()["choices"][0]["message"]["content"]
 
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
             last_err = e
-            if status in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+            if status in (429, 500, 502, 503, 504) and attempt < max_retries - 1 \
+                    and time.time() - t_start < LLM_RETRY_DEADLINE:
                 wait = 20
-                log.warning(f"LLM HTTP {status} (第{attempt+1}/{max_retries}次)，{wait}秒后重试")
+                log.warning(f"LLM HTTP {status} (第{attempt+1}/{max_retries}次，"
+                            f"已用{time.time()-t_start:.0f}s)，{wait}秒后重试")
                 time.sleep(wait)
             else:
                 raise
 
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                RuntimeError) as e:
             last_err = e
-            if attempt < max_retries - 1:
+            if attempt < max_retries - 1 and time.time() - t_start < LLM_RETRY_DEADLINE:
                 wait = 20
-                log.warning(f"LLM 连接失败 (第{attempt+1}/{max_retries}次)，{wait}秒后重试: {str(e)[:80]}")
+                log.warning(f"LLM 连接失败 (第{attempt+1}/{max_retries}次，"
+                            f"已用{time.time()-t_start:.0f}s)，{wait}秒后重试: {str(e)[:80]}")
                 time.sleep(wait)
             else:
                 raise
