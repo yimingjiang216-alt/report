@@ -6,14 +6,10 @@ on:
     - cron: '30 0 * * *'
   workflow_dispatch:  # 支持手动触发
     inputs:
-      destination:
-        description: 'test = 只发测试群，不发邮件、不更新去重库（需先配 FEISHU_WEBHOOK_TEST secret）'
-        type: choice
+      feishu_webhook_test:
+        description: '试跑：粘贴测试群 webhook（该次不发邮件、不更新去重库）。留空=正式跑'
         required: false
-        default: 'production'
-        options:
-          - production
-          - test
+        type: string
 
 permissions:
   contents: write  # 允许 git push last_sent.json
@@ -50,8 +46,8 @@ jobs:
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
           FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          FEISHU_WEBHOOK_TEST: ${{ secrets.FEISHU_WEBHOOK_TEST }}
-          TEST_MODE: ${{ github.event.inputs.destination == 'test' && '1' || '' }}
+          FEISHU_WEBHOOK_TEST: ${{ github.event.inputs.feishu_webhook_test }}
+          TEST_MODE: ${{ github.event.inputs.feishu_webhook_test && '1' || '' }}
           RSSHUB_URL: https://rsshub.rssforever.com
         run: python daily_news.py
 
@@ -68,7 +64,7 @@ jobs:
           retention-days: 30
 
       - name: Commit last_sent.json
-        if: success() && github.event.inputs.destination != 'test'
+        if: success() && !github.event.inputs.feishu_webhook_test
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
