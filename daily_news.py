@@ -797,10 +797,13 @@ def call_llm(messages):
                 stream=True,
             )
             resp.raise_for_status()
+            t_conn = time.time()   # 连接+首包（建连耗时）
             ctype = resp.headers.get("Content-Type", "")
             if "event-stream" in ctype or "stream" in ctype:
                 resp.encoding = "utf-8"   # 不显式设置时 requests 可能按 ISO-8859-1 解，中文标题会乱码
                 parts, err = [], None
+                t_first = None
+                n_chunks = 0
                 for line in resp.iter_lines(decode_unicode=True):
                     if not line or not line.startswith("data:"):
                         continue
@@ -817,12 +820,17 @@ def call_llm(messages):
                     for ch in obj.get("choices", []) or []:
                         frag = (ch.get("delta") or {}).get("content")
                         if frag:
+                            if t_first is None:
+                                # TTFT=首块到达；它与 t_conn 的差就是 prefill（吃prompt）耗时
+                                log.info(f"  LLM打点: 建连{t_conn - t_start:.0f}s → 首token{time.time() - t_start:.0f}s")
                             parts.append(frag)
+                            n_chunks += 1
                 resp.close()
                 text = "".join(parts)
                 if err:
                     raise RuntimeError(f"LLM 流式返回错误: {str(err)[:120]}")
                 if text.strip():
+                    log.info(f"  LLM打点: 输出{len(text)}字/{n_chunks}块，总耗时{time.time() - t_start:.0f}s")
                     return text
                 raise RuntimeError("LLM 流式返回空内容")
             # 服务端忽略 stream 参数时按普通JSON解析
