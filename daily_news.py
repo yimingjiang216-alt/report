@@ -129,6 +129,17 @@ RSS_SOURCES = [
     # == AI 聚合日报（通过 RSS，主力用 fetch_aihot_api 补充）==
     ("AIHOT AI日报",         "https://aihot.virxact.com/rss",                                         5),
 
+    # == 一手源补强（2026-10-05 本地批量探测，确认能拉到 RSS 且发布节奏在 48h 窗口内）==
+    ("NVIDIA Newsroom",     "https://nvidianews.nvidia.com/rss.xml?site=1",                            6),
+    ("Google Research",     "https://research.google/blog/rss/",                                        6),
+    ("Microsoft OnTheIssues","https://blogs.microsoft.com/on-the-issues/feed/",                         6),
+    ("Samsung Newsroom",    "https://news.samsung.com/global/rss",                                      5),
+    ("SK hynix Newsroom",   "https://news.skhynix.com/feed/",                                           5),
+    ("Drone Industry Ins.", "https://droneii.com/feed",                                                 4),
+    ("The Verge AI",        "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",         4),
+    ("FT Technology",       "https://www.ft.com/technology?format=rss",                                 4),  # 正文可能有付费墙，取标题+摘要
+    ("36氪快讯",            f"{RSSHUB_URL}/36kr/newsflashes",                                           3),
+
     # == RSSHub 关键词搜索（覆盖五大赛道；权重压低，让一手源在同窗口内优先占名额）==
     ("36氪-大模型",          f"{RSSHUB_URL}/36kr/search/items/大模型",                               3),
     ("36氪-具身机器人",      f"{RSSHUB_URL}/36kr/search/items/具身机器人",                           3),
@@ -992,6 +1003,11 @@ def summarize_news(raw_results):
                 LOW_VALUE_KWS = ["课程", "培训", "招聘", "月薪", "招人", "展会", "预告",
                                  "盘点", "评测", "体验"]
                 LOW_VALUE_CAP = 4
+                # 但标题里同时出现这些词，说明「评测」是交付物而不是测评稿：
+                # 微软+Hugging Face 发布 ThinkingBox 智能体评测基准被误封顶（分9→4），
+                # 发基准/数据集/框架本身是产业事件，不该按软文压。
+                LOW_VALUE_EXCLUDE = ["基准", "数据集", "benchmark", "框架", "标准",
+                                     "开发者体验"]
 
                 for item in parsed:
                     text_blob = (item.get("title", "") + " " + item.get("summary", "")).lower()
@@ -1021,6 +1037,11 @@ def summarize_news(raw_results):
 
                     title_blob = (item.get("title", "") or "").lower()
                     low_hit = next((k for k in LOW_VALUE_KWS if k in title_blob), "")
+                    # 「评测/体验」词面有歧义：标题同时带基准/数据集/框架这类交付物时，
+                    # 说的是发布了被评测的东西，不是有人写了篇测评，所以让位给其它硬关键词
+                    if low_hit in ("评测", "体验") and any(x in title_blob for x in LOW_VALUE_EXCLUDE):
+                        low_hit = next((k for k in LOW_VALUE_KWS
+                                        if k not in ("评测", "体验") and k in title_blob), "")
                     if low_hit:
                         try:
                             cur = int(item.get("score", 0) or 0)
