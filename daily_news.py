@@ -181,6 +181,15 @@ def _fresh_cutoffs():
 RSS_CANDIDATE_MAX = 40  # 送 Jina/LLM 的 RSS 素材上限（全部为窗口内新鲜文章）
 AIHOT_MATERIAL_MAX = 10 # aihot 聚合源补充的素材上限
 LLM_EVENT_MAX = 22      # 单次 LLM 输出的事件条数上限，防正文生成被 max_tokens 截断
+
+# 自动驾驶：2026-10-05 定「不并进五大赛道，除非有跨行业意义上的突破」。
+# 突破与否交给阶段A的分数门槛裁定，不用关键词白名单——开城/路测/地方法规这类常规新闻按
+# 【打分规则】（结构性影响、三个月后是否还被引用）本来就上不了8分，取消安全员、监管批准、
+# 订单量破纪录这类才到8+。放行的条目仍要和赛道内条目一起过比较趟，不是保送。
+AD_KWS = ["自动驾驶", "无人驾驶", "无人车", "无人卡车", "无人重卡",
+          "robotaxi", "智驾", "辅助驾驶", "fsd", "waymo", "self-driving"]
+AD_LANDMARK_MIN = 8
+AD_MAX_PER_ISSUE = 1    # 每期最多留几条赛道外的标志性事件：超过1条就等于变相给它开了赛道
 LLM_READ_TIMEOUT = 300   # 流式下两次收到数据之间的最大空档（含首token等待）
 LLM_RETRY_DEADLINE = 900 # 单次 LLM 调用（含全部重试）的时间预算，超时直接失败
 
@@ -1034,10 +1043,48 @@ def summarize_news(raw_results):
                 LOW_VALUE_EXCLUDE = ["基准", "数据集", "benchmark", "框架", "标准",
                                      "开发者体验"]
 
+                def _cap_low_value(item):
+                    title_blob = (item.get("title", "") or "").lower()
+                    low_hit = next((k for k in LOW_VALUE_KWS if k in title_blob), "")
+                    # 「评测/体验」词面有歧义：标题同时带基准/数据集/框架这类交付物时，
+                    # 说的是发布了被评测的东西，不是有人写了篇测评，所以让位给其它硬关键词
+                    if low_hit in ("评测", "体验") and any(x in title_blob for x in LOW_VALUE_EXCLUDE):
+                        low_hit = next((k for k in LOW_VALUE_KWS
+                                        if k not in ("评测", "体验") and k in title_blob), "")
+                    if not low_hit:
+                        return
+                    try:
+                        cur = int(item.get("score", 0) or 0)
+                    except (ValueError, TypeError):
+                        cur = 0
+                    if cur > LOW_VALUE_CAP:
+                        item["score"] = LOW_VALUE_CAP
+                        log.info(f"  低信息量封顶: [{item.get('title','')[:24]}] 分{cur}→{LOW_VALUE_CAP}（标题命中「{low_hit}」）")
+
                 for item in parsed:
                     title_blob0 = (item.get("title", "") or "").lower()
                     text_blob = title_blob0 + " " + (item.get("summary", "") or "").lower()
                     kw_track = _derive_track(text_blob)
+                    kw_title = _derive_track(title_blob0)
+                    try:
+                        score0 = int(item.get("score", 0) or 0)
+                    except (ValueError, TypeError):
+                        score0 = 0
+                    # 标题主角是自动驾驶（赛道词只落到「AI大模型」这个宽桶、或压根没落）时先过自动驾驶裁定，
+                    # 不让正文里顺带出现的「AI/算法」把它悄悄当成赛道内新闻收走
+                    if kw_title in ("", "AI大模型") and any(k in title_blob0 for k in AD_KWS):
+                        if score0 < AD_LANDMARK_MIN:
+                            item["score"] = 0
+                            item["_irrelevant"] = True
+                            log.info(f"  无关新闻过滤: [{item.get('title','')[:24]}] → 强制0分"
+                                     f"（自动驾驶非常规赛道，分{score0}<{AD_LANDMARK_MIN}）")
+                        else:
+                            item["_offtopic_landmark"] = True
+                            item["_kw_track"] = ""
+                            log.info(f"  赛道外放行: [{item.get('title','')[:24]}] 自动驾驶 分{score0}"
+                                     f"≥{AD_LANDMARK_MIN}，交比较趟裁定")
+                            _cap_low_value(item)
+                        continue
                     if not kw_track:
                         # 标题摘要完全不含任何赛道关键词 → 判无关新闻
                         item["score"] = 0
@@ -1052,7 +1099,6 @@ def summarize_news(raw_results):
                     # 摘要关键词退居两个位置：判相关性（上面的0分闸）+ LLM没给赛道时兜底补标。
                     cats = [c.strip() for c in (item.get("category", "") or "").split("、") if c.strip()]
                     llm_track = cats[0] if cats and cats[0] in TRACK_KWS else ""
-                    kw_title = _derive_track(title_blob0)
                     specific = {"算力芯片", "具身机器人", "无人机", "新型储能"}
                     chosen = kw_title or (kw_track if not llm_track else "")
                     if chosen and chosen != llm_track:
@@ -1068,21 +1114,7 @@ def summarize_news(raw_results):
                                      f"[{item.get('title','')[:24]}] {old or '无'} → {chosen}")
                     item["_kw_track"] = chosen or llm_track or kw_track
 
-                    title_blob = (item.get("title", "") or "").lower()
-                    low_hit = next((k for k in LOW_VALUE_KWS if k in title_blob), "")
-                    # 「评测/体验」词面有歧义：标题同时带基准/数据集/框架这类交付物时，
-                    # 说的是发布了被评测的东西，不是有人写了篇测评，所以让位给其它硬关键词
-                    if low_hit in ("评测", "体验") and any(x in title_blob for x in LOW_VALUE_EXCLUDE):
-                        low_hit = next((k for k in LOW_VALUE_KWS
-                                        if k not in ("评测", "体验") and k in title_blob), "")
-                    if low_hit:
-                        try:
-                            cur = int(item.get("score", 0) or 0)
-                        except (ValueError, TypeError):
-                            cur = 0
-                        if cur > LOW_VALUE_CAP:
-                            item["score"] = LOW_VALUE_CAP
-                            log.info(f"  低信息量封顶: [{item.get('title','')[:24]}] 分{cur}→{LOW_VALUE_CAP}（标题命中「{low_hit}」）")
+                    _cap_low_value(item)
 
                 # 按分数降序排列（int排序，确保类型一致）
                 for item in parsed:
@@ -1183,6 +1215,8 @@ def summarize_news(raw_results):
 
                 def _get_track(item):
                     """从category中提取赛道"""
+                    if item.get("_offtopic_landmark"):
+                        return "赛道外·自动驾驶"
                     cat = item.get("category", "")
                     for t in ["算力芯片", "具身机器人", "无人机", "新型储能"]:
                         if t in cat:
@@ -1237,11 +1271,16 @@ def summarize_news(raw_results):
                 final = []
                 company_count = {}  # {公司: 出现次数}
                 used_urls = set()   # 已选URL，防止重复链接
+                ad_used = 0         # 赛道外（自动驾驶）已入选条数
                 for item in all_sorted:
                     if len(final) >= 5:
                         break
                     # 0分条目（无关新闻/LLM弃选）彻底排除，不进选择
                     if int(item.get("score", 0) or 0) <= 0:
+                        continue
+                    # 赛道外的标志性事件每期只留 AD_MAX_PER_ISSUE 条，多了会挤掉五大赛道
+                    if item.get("_offtopic_landmark") and ad_used >= AD_MAX_PER_ISSUE:
+                        log.info(f"  赛道外限额: [{item.get('title','')[:30]}] 本期最多{AD_MAX_PER_ISSUE}条，跳过")
                         continue
                     if _is_dup(item):
                         log.info(f"  跨期去重: [{item.get('title','')}]")
@@ -1272,6 +1311,8 @@ def summarize_news(raw_results):
                         continue
                     item["selected"] = True
                     final.append(item)
+                    if item.get("_offtopic_landmark"):
+                        ad_used += 1
                     for c in companies:
                         company_count[c] = company_count.get(c, 0) + 1
                     if item_url:
@@ -1293,6 +1334,9 @@ def summarize_news(raw_results):
                         # 0分条目（无关新闻）不进阶段2
                         if score <= 0:
                             continue
+                        if item.get("_offtopic_landmark") and ad_used >= AD_MAX_PER_ISSUE:
+                            log.info(f"  赛道外限额: [{item.get('title','')[:30]}] 本期最多{AD_MAX_PER_ISSUE}条，跳过")
+                            continue
                         is_dup = _is_dup(item)
                         # 放宽逻辑：跨期重复但分数≥6的，允许进入补位（重要旧闻不丢）
                         if is_dup and score < 6:
@@ -1308,6 +1352,8 @@ def summarize_news(raw_results):
                             continue
                         item["selected"] = True
                         final.append(item)
+                        if item.get("_offtopic_landmark"):
+                            ad_used += 1
                         for c in companies:
                             company_count[c] = company_count.get(c, 0) + 1
                         if item_url:
@@ -1327,6 +1373,11 @@ def summarize_news(raw_results):
                         if _is_same_event(item, final):
                             log.info(f"  终极兜底同次skip: [{item.get('title','')[:30]}]")
                             continue
+                        # 0分条目（无关新闻）不参与兜底，否则上面那道0分闸在这条路径上被绕过
+                        if int(item.get("score", 0) or 0) <= 0:
+                            continue
+                        if item.get("_offtopic_landmark") and ad_used >= AD_MAX_PER_ISSUE:
+                            continue
                         # 只保URL不重复，放掉跨期和同公司限制
                         item_url = (item.get("source_url", "") or "").strip()
                         if item_url and item_url in used_urls:
@@ -1335,6 +1386,8 @@ def summarize_news(raw_results):
                             used_urls.add(item_url)
                         item["selected"] = True
                         final.append(item)
+                        if item.get("_offtopic_landmark"):
+                            ad_used += 1
                         log.info(f"  终极兜底: [{item.get('title','')[:30]}] (分{item.get('score','?')})")
 
                 # === 阶段4：跨期语义去重复核（LLM终审） ===
