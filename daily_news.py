@@ -100,7 +100,6 @@ RSS_SOURCES = [
     ("Semiconductor Digest", "https://www.semiconductor-digest.com/feed/",                            4),
     ("Tom's Hardware",       "https://www.tomshardware.com/feeds/all",                                3),
     ("ServeTheHome",         "https://www.servethehome.com/feed/",                                    4),
-    ("SemiWiki",             "https://semiwiki.com/feed/",                                            3),
     ("Blocks & Files",       "https://blocksandfiles.com/feed/",                                      3),
 
     # == 新型电池 / 硬科技 ==
@@ -979,18 +978,51 @@ def summarize_news(raw_results):
                     "无人机": ["无人机", "drone", "uav", "evtol", "dji", "大疆", "无人系统", "低空", "飞行器", "unmanned", "多旋翼", "配送机"],
                     "新型储能": ["电池", "储能", "固态", "锂", "battery", "储能", "充电", "光伏", "新能源", "燃料电池", "钠离子", "energy storage", "超级快充", "换电"],
                 }
+                # AI大模型 的词面最宽（"模型/算法/推理"什么都能套），所以判定顺序放最后兜底
+                TRACK_PRIORITY = ["无人机", "具身机器人", "算力芯片", "新型储能", "AI大模型"]
+
+                def _derive_track(text_blob):
+                    """按优先级返回关键词命中的赛道，判不出来返回空串"""
+                    for track in TRACK_PRIORITY:
+                        if any(k in text_blob for k in TRACK_KWS[track]):
+                            return track
+                    return ""
+
+                # 低信息量题材：事件本身不构成产业变化，只出现在标题里才封顶（避免误伤正文顺带提到的正经事件）
+                LOW_VALUE_KWS = ["课程", "培训", "招聘", "月薪", "招人", "展会", "预告",
+                                 "盘点", "评测", "体验"]
+                LOW_VALUE_CAP = 4
+
                 for item in parsed:
                     text_blob = (item.get("title", "") + " " + item.get("summary", "")).lower()
-                    matched = False
-                    for track, kws in TRACK_KWS.items():
-                        if any(k in text_blob for k in kws):
-                            matched = True
-                            break
-                    if not matched:
+                    kw_track = _derive_track(text_blob)
+                    if not kw_track:
                         # 标题摘要完全不含任何赛道关键词 → 判无关新闻
                         item["score"] = 0
                         item["_irrelevant"] = True
                         log.info(f"  无关新闻过滤: [{item.get('title','')[:30]}] → 强制0分")
+                        continue
+                    item["_kw_track"] = kw_track
+
+                    # 赛道以关键词判定为准，LLM写的category只当兜底：
+                    # companies 写错会让后面的联网核查也跟着判错赛道
+                    cats = [c.strip() for c in (item.get("category", "") or "").split("、") if c.strip()]
+                    if cats and cats[0] != kw_track:
+                        old = cats[0]
+                        cats = [kw_track] + [c for c in cats[1:] if c != old]
+                        item["category"] = "、".join(cats)
+                        log.info(f"  赛道改判: [{item.get('title','')[:24]}] {old} → {kw_track}")
+
+                    title_blob = (item.get("title", "") or "").lower()
+                    low_hit = next((k for k in LOW_VALUE_KWS if k in title_blob), "")
+                    if low_hit:
+                        try:
+                            cur = int(item.get("score", 0) or 0)
+                        except (ValueError, TypeError):
+                            cur = 0
+                        if cur > LOW_VALUE_CAP:
+                            item["score"] = LOW_VALUE_CAP
+                            log.info(f"  低信息量封顶: [{item.get('title','')[:24]}] 分{cur}→{LOW_VALUE_CAP}（标题命中「{low_hit}」）")
 
                 # 按分数降序排列（int排序，确保类型一致）
                 for item in parsed:
@@ -1752,6 +1784,35 @@ def generate_brief(news_items, report_date):
 
 # ── 7. Main ───────────────────────────────────────────────────────────────────
 
+# 送达标记：一次运行失败后 Actions 会重跑一次，靠这个文件记住"哪些外部动作已经做过"，
+# 避免重跑时给同一个群/同一个邮箱发两遍。按天命名，第二天自然失效。
+_DELIVER_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _delivery_mark_path():
+    return os.path.join(_DELIVER_DIR,
+                        f"_delivered_{datetime.now(timezone.utc).strftime('%Y%m%d')}.mark")
+
+
+def _already_delivered(kind):
+    try:
+        with open(_delivery_mark_path(), encoding="utf-8") as f:
+            return kind in f.read().split()
+    except FileNotFoundError:
+        return False
+    except Exception as e:
+        log.warning(f"  读取送达标记失败，按未送达处理: {e}")
+        return False
+
+
+def _mark_delivered(kind):
+    try:
+        with open(_delivery_mark_path(), "a", encoding="utf-8") as f:
+            f.write(kind + " ")
+    except Exception as e:
+        log.warning(f"  写送达标记失败: {e}")
+
+
 def main():
     log.info("=" * 60)
     log.info("科技前沿简报 开始运行")
@@ -1835,21 +1896,37 @@ def main():
     if TEST_MODE:
         success = True
         log.info("  测试模式：跳过邮件发送")
+    elif _already_delivered("email"):
+        success = True
+        log.info("  本期邮件已发过（重跑），跳过避免重复发送")
     else:
         success = send_email(html_content, subject)
+        if success:
+            _mark_delivered("email")
 
     log.info("【Step 5】写入 CSV...")
-    append_to_csv(news_items, report_date)
+    if _already_delivered("csv"):
+        log.info("  本期 CSV 已写过（重跑），跳过避免重复追加")
+    else:
+        append_to_csv(news_items, report_date)
+        _mark_delivered("csv")
 
     log.info("【Step 6】生成 PDF...")
     generate_brief(news_items, report_date)
 
     log.info("【Step 7】推送飞书...")
-    send_feishu(news_items, report_date)
+    if _already_delivered("feishu"):
+        log.info("  本期飞书已推送过（重跑），跳过避免重复推送")
+    else:
+        if send_feishu(news_items, report_date):
+            _mark_delivered("feishu")
 
     # ── 保存本期标题，供跨期去重（保留最近3期=15条） ──
     if TEST_MODE:
         log.info("  测试模式：跳过 last_sent.json 写入，去重库保持不变")
+    elif _already_delivered("last_sent"):
+        # 重跑时不覆盖：上期第一次尝试已经发出去并写库了，用那一版才对得上读者实际看到的内容
+        log.info("  本期去重库已写入（重跑），跳过避免用未发送的版本覆盖")
     else:
         try:
             selected_items = [item for item in news_items if item.get("selected") is True]
@@ -1872,6 +1949,7 @@ def main():
             with open(last_sent_path, "w", encoding="utf-8") as f:
                 json.dump({"titles": all_titles, "date": report_date}, f, ensure_ascii=False, indent=2)
             log.info(f"✅ 已保存去重库到 last_sent.json（{len(all_titles)} 条，含上期）")
+            _mark_delivered("last_sent")
         except Exception as e:
             log.warning(f"保存 last_sent.json 失败: {e}")
 

@@ -49,7 +49,15 @@ jobs:
           FEISHU_WEBHOOK_TEST: ${{ github.event.inputs.feishu_webhook_test }}
           TEST_MODE: ${{ github.event.inputs.feishu_webhook_test && '1' || '' }}
           RSSHUB_URL: https://rsshub.bestblogs.dev
-        run: python daily_news.py
+        run: |
+          # LLM 服务偶发 429/读超时会让整次跑静默失败（当天就收不到简报）。
+          # 失败重试一次；脚本内部记录已完成的推送步骤，重跑不会重复发。
+          if python daily_news.py; then
+            exit 0
+          fi
+          echo "首次运行失败，等待 120 秒后重试一次…"
+          sleep 120
+          python daily_news.py
 
       - name: Upload artifacts
         if: always()
