@@ -135,7 +135,6 @@ RSS_SOURCES = [
     ("Microsoft OnTheIssues","https://blogs.microsoft.com/on-the-issues/feed/",                         6),
     ("Samsung Newsroom",    "https://news.samsung.com/global/rss",                                      5),
     ("SK hynix Newsroom",   "https://news.skhynix.com/feed/",                                           5),
-    ("Drone Industry Ins.", "https://droneii.com/feed",                                                 4),
     ("The Verge AI",        "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",         4),
     ("FT Technology",       "https://www.ft.com/technology?format=rss",                                 4),  # 正文可能有付费墙，取标题+摘要
     ("36氪快讯",            f"{RSSHUB_URL}/36kr/newsflashes",                                           3),
@@ -158,6 +157,27 @@ LLM_CONTENT_CHARS = 3000  # 送 LLM 时每篇截断上限（与抓取一致，�
 RSS_PER_SOURCE = 6  # 每天跑一次，每源取6条确保覆盖充分
 JINA_DELAY_SEC = 0.2  # 每线程抓取前的小睡；并行5路下0.2秒足够防429
 FRESH_WINDOW_DAYS = 2   # 采样阶段就丢弃超过这个天数的文章，避免旧文占满名额
+
+# 一手新闻室的发布节奏是每周1~2条（实测最新一条距今 64~93 小时），统一按 48h 筛
+# 等于把它们全部筛掉——而这批源恰恰是唯一不能被二手报道替代的。
+# 给它们单独放宽到 7 天；媒体/聚合源保持 2 天，速度是它们唯一的优势。
+SLOW_FRESH_WINDOWS = {
+    "NVIDIA Newsroom": 7,
+    "Google Research": 7,
+    "Microsoft OnTheIssues": 7,
+    "Samsung Newsroom": 7,
+    "SK hynix Newsroom": 7,
+}
+
+
+def _fresh_cutoffs():
+    """返回 (默认截止日, {一手源名: 截止日})，格式 YYYY-MM-DD（UTC）。
+    采样阶段和素材兜底筛必须用同一套，否则一边放宽一边砍回原样。"""
+    now = datetime.now(timezone.utc)
+    default = (now - timedelta(days=FRESH_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    slow = {name: (now - timedelta(days=d)).strftime("%Y-%m-%d")
+            for name, d in SLOW_FRESH_WINDOWS.items()}
+    return default, slow
 RSS_CANDIDATE_MAX = 40  # 送 Jina/LLM 的 RSS 素材上限（全部为窗口内新鲜文章）
 AIHOT_MATERIAL_MAX = 10 # aihot 聚合源补充的素材上限
 LLM_EVENT_MAX = 22      # 单次 LLM 输出的事件条数上限，防正文生成被 max_tokens 截断
@@ -400,8 +420,9 @@ def search_news():
     all_articles, seen = [], set()
     # 采样阶段就按发布时间筛掉旧文：官方博客几天不更新是常态，
     # 让它们占满名额会导致最终素材只剩十几条
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=FRESH_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    cutoff, slow_cutoffs = _fresh_cutoffs()
     dropped_stale = 0
+    kept_slow = 0
     # 8路并行拉取；按 RSS_SOURCES 原始顺序收结果，保证与串行版输出完全一致
     with ThreadPoolExecutor(max_workers=8) as ex:
         futures = [ex.submit(_fetch_rss, name, url, RSS_PER_SOURCE)
@@ -412,9 +433,10 @@ def search_news():
                 arts = fut.result()
             except Exception:
                 arts = []
+            my_cutoff = slow_cutoffs.get(source_name, cutoff)
             for art in arts:
                 pub_day = _pub_utc_str(art)[:10]
-                if pub_day and pub_day < cutoff:
+                if pub_day and pub_day < my_cutoff:
                     dropped_stale += 1
                     continue
                 key = re.sub(r"\s+", "", art["title"])[:30]
@@ -422,9 +444,12 @@ def search_news():
                     seen.add(key)
                     art["weight"] = weight
                     art["_age_h"] = _age_hours(art)
+                    if source_name in slow_cutoffs and art["_age_h"] > FRESH_WINDOW_DAYS * 24:
+                        kept_slow += 1
                     all_articles.append(art)
 
-    log.info(f"RSS 共拉取 {len(all_articles)} 篇（去重后，丢弃{dropped_stale}篇 {FRESH_WINDOW_DAYS} 天以外的旧文）")
+    log.info(f"RSS 共拉取 {len(all_articles)} 篇（去重后，丢弃{dropped_stale}篇 {FRESH_WINDOW_DAYS} 天以外的旧文；"
+             f"其中一手新闻室按7天窗口多留了{kept_slow}篇）")
     if not all_articles:
         return [], []
 
@@ -1868,8 +1893,8 @@ def main():
         log.error("无结果，退出")
         sys.exit(1)
 
-    # ── 过滤旧文章：只保留最近 FRESH_WINDOW_DAYS 天（RSS 采样阶段已筛过一遍，这里兜底 aihot 等补充源） ──
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=FRESH_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    # ── 过滤旧文章：默认只保留最近 FRESH_WINDOW_DAYS 天，一手新闻室按其窗口（RSS 采样阶段已筛过一遍，这里兜底 aihot 等补充源）──
+    cutoff, slow_cutoffs = _fresh_cutoffs()
     fresh_results = []
     dropped_unknown = 0
     dropped_old = 0
@@ -1880,7 +1905,9 @@ def main():
         if not pub_clean:
             dropped_unknown += 1
             continue
-        if pub_clean < cutoff:
+        # 兜底筛也必须用同一套窗口，否则采样阶段给一手新闻室放宽的7天在这里又被砍掉
+        item_cutoff = slow_cutoffs.get(item.get("source", ""), cutoff)
+        if pub_clean < item_cutoff:
             dropped_old += 1
             continue
         item.setdefault("_age_h", _age_hours(item))
