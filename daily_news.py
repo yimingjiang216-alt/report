@@ -190,6 +190,127 @@ AD_KWS = ["自动驾驶", "无人驾驶", "无人车", "无人卡车", "无人�
           "robotaxi", "智驾", "辅助驾驶", "fsd", "waymo", "self-driving"]
 AD_LANDMARK_MIN = 8
 AD_MAX_PER_ISSUE = 1    # 每期最多留几条赛道外的标志性事件：超过1条就等于变相给它开了赛道
+
+# ── 选题裁定层：三层链路（收 / 判 / 选）里的「收」──────────────────────────
+# 一条事件要不要收、算哪个赛道，只在 admit_event() 里决定；
+# 下面的选取层只读 item["_kw_track"] / item["_offtopic_landmark"] / score，不再各自判关键词。
+# 关键词表和判定顺序都放模块级：改口径只有一处，测试也能直接断言。
+TRACK_KWS = {
+    "AI大模型": ["ai", "人工智能", "大模型", "模型", "gpt", "llm", "agent", "智能体", "deepseek", "chatgpt", "claude", "gemini", "qwen", "通义", "智谱", "openai", "anthropic", "谷歌", "google", "meta", "微软", "算法", "机器学习", "深度学习", "生成式", "推理"],
+    "算力芯片": ["芯片", "gpu", "npu", "半导体", "晶圆", "算力", "封测", "光刻", "英伟达", "nvidia", "昇腾", "制程", "处理器", "chip", "semiconductor", "foundry"],
+    "具身机器人": ["机器人", "具身", "humanoid", "人形", "机械臂", "robotics", "robots", "麦肯", "宇树", "figure", "特斯拉optimus", "digit", "机械狗", "协作机器人"],
+    "无人机": ["无人机", "drone", "uav", "evtol", "dji", "大疆", "无人系统", "低空", "飞行器", "unmanned", "多旋翼", "配送机"],
+    "新型储能": ["电池", "储能", "固态", "锂", "battery", "充电", "光伏", "新能源", "燃料电池", "钠离子", "energy storage", "超级快充", "换电"],
+}
+# AI大模型 的词面最宽（"模型/算法/推理"什么都能套），所以判定顺序放最后兜底
+TRACK_PRIORITY = ["无人机", "具身机器人", "算力芯片", "新型储能", "AI大模型"]
+SPECIFIC_TRACKS = {"算力芯片", "具身机器人", "无人机", "新型储能"}
+
+# 低信息量题材：事件本身不构成产业变化，只出现在标题里才封顶（避免误伤正文顺带提到的正经事件）
+LOW_VALUE_KWS = ["课程", "培训", "招聘", "月薪", "招人", "展会", "预告",
+                 "盘点", "评测", "体验"]
+LOW_VALUE_CAP = 4
+# 但标题里同时出现这些词，说明「评测」是交付物而不是测评稿：
+# 微软+Hugging Face 发布 ThinkingBox 智能体评测基准被误封顶（分9→4），
+# 发基准/数据集/框架本身是产业事件，不该按软文压。
+LOW_VALUE_EXCLUDE = ["基准", "数据集", "benchmark", "框架", "标准",
+                     "开发者体验"]
+
+
+def _kw_track(text_blob):
+    """按优先级返回关键词命中的赛道，判不出来返回空串"""
+    for track in TRACK_PRIORITY:
+        if any(k in text_blob for k in TRACK_KWS[track]):
+            return track
+    return ""
+
+
+def _item_score(item):
+    try:
+        return int(item.get("score", 0) or 0)
+    except (ValueError, TypeError):
+        return 0
+
+
+def admit_event(item):
+    """选题裁定，返回 'track' / 'landmark' / 'reject'。
+    'reject' 时已把 score 归零并标记 _irrelevant；'track' 时赛道写在 item["_kw_track"]。
+    四条口径各打一条日志（无关新闻过滤 / 赛道外放行 / 赛道改判 / 赛道补标），线上靠日志核对。"""
+    title = (item.get("title", "") or "").lower()
+    blob = title + " " + (item.get("summary", "") or "").lower()
+    kw_all = _kw_track(blob)     # 标题+摘要：只用来判「在不在选题范围内」
+    kw_title = _kw_track(title)  # 标题：唯一允许改判赛道的依据
+    score = _item_score(item)
+
+    # 标题主角是自动驾驶（赛道词只落到「AI大模型」宽桶、或压根没落）时先走自动驾驶裁定。
+    # 不收进五大赛道是她的口径；若放任宽桶命中，常规智驾新闻会因为摘要里
+    # 顺带出现「AI/算法」而被悄悄收走——收录与否就变成了看措辞，不是看事件。
+    if kw_title in ("", "AI大模型") and any(k in title for k in AD_KWS):
+        if score < AD_LANDMARK_MIN:
+            item["score"] = 0
+            item["_irrelevant"] = True
+            log.info(f"  无关新闻过滤: [{item.get('title','')[:24]}] → 强制0分"
+                     f"（自动驾驶非常规赛道，分{score}<{AD_LANDMARK_MIN}）")
+            return "reject"
+        item["_offtopic_landmark"] = True
+        item["_kw_track"] = ""
+        log.info(f"  赛道外放行: [{item.get('title','')[:24]}] 自动驾驶 分{score}"
+                 f"≥{AD_LANDMARK_MIN}，交比较趟裁定")
+        return "landmark"
+
+    if not kw_all:
+        # 标题摘要完全不含任何赛道关键词 → 判无关新闻
+        item["score"] = 0
+        item["_irrelevant"] = True
+        log.info(f"  无关新闻过滤: [{item.get('title','')[:30]}] → 强制0分")
+        return "reject"
+
+    # 赛道判定：只有标题里带赛道词才允许覆盖 LLM 写的 category。
+    # 上一版用「标题+摘要」的关键词去改判，线上跑出了反例：
+    # 「行业评论文章探讨智能体AI超级周期」因摘要顺带提到"机器人"被改成具身机器人，
+    # 「傅里叶智能音频芯片港股大涨」因摘要提到"机器人"被从算力芯片改成具身机器人。
+    # 正文提到 ≠ 这条新闻是关于它的；标题带词才是主题。
+    cats = [c.strip() for c in (item.get("category", "") or "").split("、") if c.strip()]
+    llm_track = cats[0] if cats and cats[0] in TRACK_KWS else ""
+    chosen = kw_title or (kw_all if not llm_track else "")
+    if chosen and chosen != llm_track:
+        # 例外：关键词只落到「AI大模型」这个宽桶而 LLM 给了具体赛道时不覆盖——
+        # 宽桶词面太泛（模型/算法/推理什么都能套），不如正文语义判断精确
+        if chosen == "AI大模型" and llm_track in SPECIFIC_TRACKS:
+            chosen = llm_track
+        else:
+            old = cats[0] if cats else ""
+            cats = [chosen] + [c for c in cats[1:] if c not in TRACK_KWS]
+            item["category"] = "、".join(cats)
+            log.info(f"  {'赛道改判' if llm_track else '赛道补标'}: "
+                     f"[{item.get('title','')[:24]}] {old or '无'} → {chosen}")
+    item["_kw_track"] = chosen or llm_track or kw_all
+    return "track"
+
+
+def cap_low_value(item):
+    """判层之一：低信息量题材封顶到 LOW_VALUE_CAP，分数只降不升。"""
+    title = (item.get("title", "") or "").lower()
+    low_hit = next((k for k in LOW_VALUE_KWS if k in title), "")
+    # 「评测/体验」词面有歧义：标题同时带基准/数据集/框架这类交付物时，
+    # 说的是发布了被评测的东西，不是有人写了篇测评，所以让位给其它硬关键词
+    if low_hit in ("评测", "体验") and any(x in title for x in LOW_VALUE_EXCLUDE):
+        low_hit = next((k for k in LOW_VALUE_KWS
+                        if k not in ("评测", "体验") and k in title), "")
+    if not low_hit:
+        return
+    cur = _item_score(item)
+    if cur > LOW_VALUE_CAP:
+        item["score"] = LOW_VALUE_CAP
+        log.info(f"  低信息量封顶: [{item.get('title','')[:24]}] 分{cur}→{LOW_VALUE_CAP}（标题命中「{low_hit}」）")
+
+
+def apply_item_rules(parsed):
+    """对 LLM 输出的每个事件依次跑：收（admit_event）→ 判（cap_low_value）。"""
+    for item in parsed:
+        if admit_event(item) == "reject":
+            continue
+        cap_low_value(item)
 LLM_READ_TIMEOUT = 300   # 流式下两次收到数据之间的最大空档（含首token等待）
 LLM_RETRY_DEADLINE = 900 # 单次 LLM 调用（含全部重试）的时间预算，超时直接失败
 
@@ -1014,107 +1135,8 @@ def summarize_news(raw_results):
                 for item in parsed:
                     item["selected"] = False
 
-                # ── 代码级赛道关键词硬校验：无关新闻强制降分 ──
-                # 不赌LLM自觉，用关键词判断是否属于五大赛道
-                TRACK_KWS = {
-                    "AI大模型": ["ai", "人工智能", "大模型", "模型", "gpt", "llm", "agent", "智能体", "deepseek", "chatgpt", "claude", "gemini", "qwen", "通义", "智谱", "openai", "anthropic", "谷歌", "google", "meta", "微软", "算法", "机器学习", "深度学习", "生成式", "推理"],
-                    "算力芯片": ["芯片", "gpu", "npu", "半导体", "晶圆", "算力", "封测", "光刻", "英伟达", "nvidia", "昇腾", "晶圆", "制程", "处理器", "chip", "semiconductor", "foundry"],
-                    "具身机器人": ["机器人", "具身", "humanoid", "人形", "机械臂", "robotics", "robots", "麦肯", "宇树", "figure", "特斯拉optimus", "digit", "机械狗", "协作机器人"],
-                    "无人机": ["无人机", "drone", "uav", "evtol", "dji", "大疆", "无人系统", "低空", "飞行器", "unmanned", "多旋翼", "配送机"],
-                    "新型储能": ["电池", "储能", "固态", "锂", "battery", "储能", "充电", "光伏", "新能源", "燃料电池", "钠离子", "energy storage", "超级快充", "换电"],
-                }
-                # AI大模型 的词面最宽（"模型/算法/推理"什么都能套），所以判定顺序放最后兜底
-                TRACK_PRIORITY = ["无人机", "具身机器人", "算力芯片", "新型储能", "AI大模型"]
-
-                def _derive_track(text_blob):
-                    """按优先级返回关键词命中的赛道，判不出来返回空串"""
-                    for track in TRACK_PRIORITY:
-                        if any(k in text_blob for k in TRACK_KWS[track]):
-                            return track
-                    return ""
-
-                # 低信息量题材：事件本身不构成产业变化，只出现在标题里才封顶（避免误伤正文顺带提到的正经事件）
-                LOW_VALUE_KWS = ["课程", "培训", "招聘", "月薪", "招人", "展会", "预告",
-                                 "盘点", "评测", "体验"]
-                LOW_VALUE_CAP = 4
-                # 但标题里同时出现这些词，说明「评测」是交付物而不是测评稿：
-                # 微软+Hugging Face 发布 ThinkingBox 智能体评测基准被误封顶（分9→4），
-                # 发基准/数据集/框架本身是产业事件，不该按软文压。
-                LOW_VALUE_EXCLUDE = ["基准", "数据集", "benchmark", "框架", "标准",
-                                     "开发者体验"]
-
-                def _cap_low_value(item):
-                    title_blob = (item.get("title", "") or "").lower()
-                    low_hit = next((k for k in LOW_VALUE_KWS if k in title_blob), "")
-                    # 「评测/体验」词面有歧义：标题同时带基准/数据集/框架这类交付物时，
-                    # 说的是发布了被评测的东西，不是有人写了篇测评，所以让位给其它硬关键词
-                    if low_hit in ("评测", "体验") and any(x in title_blob for x in LOW_VALUE_EXCLUDE):
-                        low_hit = next((k for k in LOW_VALUE_KWS
-                                        if k not in ("评测", "体验") and k in title_blob), "")
-                    if not low_hit:
-                        return
-                    try:
-                        cur = int(item.get("score", 0) or 0)
-                    except (ValueError, TypeError):
-                        cur = 0
-                    if cur > LOW_VALUE_CAP:
-                        item["score"] = LOW_VALUE_CAP
-                        log.info(f"  低信息量封顶: [{item.get('title','')[:24]}] 分{cur}→{LOW_VALUE_CAP}（标题命中「{low_hit}」）")
-
-                for item in parsed:
-                    title_blob0 = (item.get("title", "") or "").lower()
-                    text_blob = title_blob0 + " " + (item.get("summary", "") or "").lower()
-                    kw_track = _derive_track(text_blob)
-                    kw_title = _derive_track(title_blob0)
-                    try:
-                        score0 = int(item.get("score", 0) or 0)
-                    except (ValueError, TypeError):
-                        score0 = 0
-                    # 标题主角是自动驾驶（赛道词只落到「AI大模型」这个宽桶、或压根没落）时先过自动驾驶裁定，
-                    # 不让正文里顺带出现的「AI/算法」把它悄悄当成赛道内新闻收走
-                    if kw_title in ("", "AI大模型") and any(k in title_blob0 for k in AD_KWS):
-                        if score0 < AD_LANDMARK_MIN:
-                            item["score"] = 0
-                            item["_irrelevant"] = True
-                            log.info(f"  无关新闻过滤: [{item.get('title','')[:24]}] → 强制0分"
-                                     f"（自动驾驶非常规赛道，分{score0}<{AD_LANDMARK_MIN}）")
-                        else:
-                            item["_offtopic_landmark"] = True
-                            item["_kw_track"] = ""
-                            log.info(f"  赛道外放行: [{item.get('title','')[:24]}] 自动驾驶 分{score0}"
-                                     f"≥{AD_LANDMARK_MIN}，交比较趟裁定")
-                            _cap_low_value(item)
-                        continue
-                    if not kw_track:
-                        # 标题摘要完全不含任何赛道关键词 → 判无关新闻
-                        item["score"] = 0
-                        item["_irrelevant"] = True
-                        log.info(f"  无关新闻过滤: [{item.get('title','')[:30]}] → 强制0分")
-                        continue
-                    # 赛道判定：只有标题里带赛道词才允许覆盖 LLM 写的 category。
-                    # 上一版用「标题+摘要」的关键词去改判，线上跑出了反例：
-                    # 「行业评论文章探讨智能体AI超级周期」因摘要顺带提到"机器人"被改成具身机器人，
-                    # 「傅里叶智能音频芯片港股大涨」因摘要提到"机器人"被从算力芯片改成具身机器人。
-                    # 正文提到 ≠ 这条新闻是关于它的；标题带词才是主题。
-                    # 摘要关键词退居两个位置：判相关性（上面的0分闸）+ LLM没给赛道时兜底补标。
-                    cats = [c.strip() for c in (item.get("category", "") or "").split("、") if c.strip()]
-                    llm_track = cats[0] if cats and cats[0] in TRACK_KWS else ""
-                    specific = {"算力芯片", "具身机器人", "无人机", "新型储能"}
-                    chosen = kw_title or (kw_track if not llm_track else "")
-                    if chosen and chosen != llm_track:
-                        # 例外：关键词只落到「AI大模型」这个宽桶而 LLM 给了具体赛道时不覆盖——
-                        # 宽桶词面太泛（模型/算法/推理什么都能套），不如正文语义判断精确
-                        if chosen == "AI大模型" and llm_track in specific:
-                            chosen = llm_track
-                        else:
-                            old = cats[0] if cats else ""
-                            cats = [chosen] + [c for c in cats[1:] if c not in TRACK_KWS]
-                            item["category"] = "、".join(cats)
-                            log.info(f"  {'赛道改判' if llm_track else '赛道补标'}: "
-                                     f"[{item.get('title','')[:24]}] {old or '无'} → {chosen}")
-                    item["_kw_track"] = chosen or llm_track or kw_track
-
-                    _cap_low_value(item)
+                # ── 代码级规则：收（选题裁定）+ 判（低信息量封顶），逻辑集中在模块级 ──
+                apply_item_rules(parsed)
 
                 # 按分数降序排列（int排序，确保类型一致）
                 for item in parsed:
