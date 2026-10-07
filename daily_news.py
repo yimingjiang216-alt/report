@@ -919,10 +919,29 @@ _STRAY_TITLE_RE = re.compile(r'\}\s*,\s*("title"\s*:\s*"(?:[^"\\]|\\.)*")\s*\}')
 
 
 def _split_top_objects(body):
-    """把 JSON 数组体切成顶层对象字符串，字符串内部（含转义）的花括号不计数。"""
+    """切成顶层对象字符串，字符串内部（含转义）的花括号不计数。
+
+    行首的 `{` 当硬断点用：某行对象没闭合就撞上下一行的对象时，就地断开。
+    否则一个漏写的右括号会把后面所有条目吞进同一个块——2026-10-07 改 JSONL
+    后实测「22 行里有 1 行少个 }」只剩 4 条，就是这个原因。
+    单行 payload（旧的整体数组写法）没有行边界，行为与逐字符扫描完全一致。
+    """
     out, depth, start = [], 0, None
     in_str = esc = False
+    last_nl = -1
     for i, c in enumerate(body):
+        # 换行永远先结算。JSON 字符串里本来就不允许裸换行（必须转义），
+        # 所以撞上裸换行就说明那个字符串本身是断的。
+        if c == "\n":
+            last_nl = i
+            continue
+        # 行首的 `{` 是无条件硬边界——必须排在 in_str 判断之前，
+        # 否则上一个对象里没闭合的字符串会一路把后面所有条目吞成一块
+        # （2026-10-07 实测：1 行在对象中间被截断，22 条只剩 9 条）。
+        if c == "{" and depth > 0 and start is not None and not body[last_nl + 1:i].strip():
+            out.append(body[start:i])
+            depth, start = 0, None
+            in_str = esc = False
         if in_str:
             if esc:
                 esc = False
@@ -942,14 +961,40 @@ def _split_top_objects(body):
             if depth == 0 and start is not None:
                 out.append(body[start:i + 1])
                 start = None
+    if start is not None:
+        out.append(body[start:])
     return out
 
 
+def _close_missing_braces(chunk):
+    """末尾缺右括号时补齐（只补括号，不造字段）。字符串没闭合就判为救不了。"""
+    depth, in_str, esc = 0, False, False
+    for c in chunk:
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}" and depth > 0:
+            depth -= 1
+    if in_str or depth <= 0:
+        return None
+    return chunk.rstrip().rstrip(",") + "}" * depth
+
+
 def _salvage_items(json_text, log):
-    """整数组解析失败时的最后手段：逐条抢救，一条坏不牵连其余。
+    """不依赖外层数组：按大括号深度切出顶层对象逐个解析，一条坏不牵连其余。
 
     返回 (items, n_dropped)。宁可少几条也不能整期归零——归零意味着当天零交付，
     而且旧逻辑还照常发邮件/写CSV/退出0，故障在 GitHub 上是绿的，没人会发现。
+    补括号救回来的条目必须有 title+summary，否则宁可丢：半条新闻会空投进简报。
     """
     body = json_text.strip()
     if body.startswith("["):
@@ -957,16 +1002,33 @@ def _salvage_items(json_text, log):
     if body.endswith("]"):
         body = body[:-1]
 
-    fixed_all = _STRAY_TITLE_RE.sub(lambda m: ", " + m.group(1) + "}", body)
+    def _fix(o):
+        return _STRAY_TITLE_RE.sub(lambda m: ", " + m.group(1) + "}", o)
+
+    # 顺序很重要：先把外溢的 title 拉回括号内，再切块。
+    # 反过来切块器会把 `}, "title": "x"}` 里那段当噪声丢掉，条目虽然解析成功却没标题。
     items, dropped = [], 0
-    for chunk in _split_top_objects(fixed_all):
-        obj = None
-        for cand in (chunk, _STRAY_TITLE_RE.sub(lambda m: ", " + m.group(1) + "}", chunk)):
+    for chunk in _split_top_objects(_fix(body)):
+        obj, was_repaired = None, False
+        for cand in (chunk, _fix(chunk)):
             try:
                 obj = json.loads(cand)
                 break
             except (json.JSONDecodeError, ValueError):
                 continue
+        if obj is None:
+            for cand in (_close_missing_braces(chunk), _close_missing_braces(_fix(chunk))):
+                if not cand:
+                    continue
+                try:
+                    obj = json.loads(cand)
+                    was_repaired = True
+                    break
+                except (json.JSONDecodeError, ValueError):
+                    continue
+        if isinstance(obj, dict) and not (obj.get("title") and obj.get("summary")) and was_repaired:
+            log.error(f"  补括号后仍缺标题/摘要，丢弃: {chunk[:80]}")
+            obj = None
         if isinstance(obj, dict):
             items.append(obj)
         else:
@@ -1057,9 +1119,12 @@ def summarize_news(raw_results):
 13. selected: 全部填false（由代码决定最终入选）
 14. 字段值不得含英文双引号，改用书名号《》
 
-严格输出JSON数组，按score降序排列，无其他内容：
-[{{"index":1,"score":9,"selected":false,"category":"AI大模型、技术突破","title":"标题","summary":"摘要","key_point":"核心观点","companies":"公司","sentiment":"正面","cluster_tag":"厂商动态类","source_index":"1","source_url":"","source_name":"来源","author":""}}]
-
+输出格式（**硬性要求**）：每行输出且只输出一个独立的 JSON 对象，按 score 降序排列。
+行与行之间不要逗号，不要在首尾加方括号，不要 markdown 代码块，不要任何说明文字。
+每一行必须能单独被 JSON 解析器读通——开括号和闭括号必须在那一行内自己配平，
+所有字段（包括 title）都写在该对象的括号**内部**，一个都不许留在括号外面。
+单行示例（照这个形状，一行一条）：
+{{"index":1,"score":9,"selected":false,"category":"AI大模型、技术突破","title":"标题","summary":"摘要","key_point":"核心观点","companies":"公司","sentiment":"正面","cluster_tag":"厂商动态类","source_index":"1","source_url":"","source_name":"来源","author":""}}
 """
     # 读取上期已发标题，追加跨期去重规则
     last_sent_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_sent.json")
@@ -1094,7 +1159,7 @@ def summarize_news(raw_results):
     log.info("调用 LLM 生成简报...")
     try:
         raw_text = call_llm([
-            {"role": "system", "content": "你是一位极度博学、极度怀疑的科技产业洞察者。你读过所有财报和创始人传记，见过无数次泡沫与崩盘的循环。你不会被PR稿打动，只关心结构性变化——谁的护城河加深了，谁的定价权被动摇了，什么技术突破是真实的而非营销噪音。只输出严格JSON数组，不含任何markdown标记或说明文字。"},
+            {"role": "system", "content": "你是一位极度博学、极度怀疑的科技产业洞察者。你读过所有财报和创始人传记，见过无数次泡沫与崩盘的循环。你不会被PR稿打动，只关心结构性变化——谁的护城河加深了，谁的定价权被动摇了，什么技术突破是真实的而非营销噪音。每行只输出一个独立的JSON对象，不要包外层数组、不要逗号分隔、不要markdown标记，也不要有任何说明文字。"},
             {"role": "user",   "content": user_prompt},
         ])
         # 保存调试文件
@@ -1106,6 +1171,12 @@ def summarize_news(raw_results):
 
     # 解析 JSON（去掉可能的 ```json 标记）
     text = raw_text.strip().replace("```json", "").replace("```", "").strip()
+    # 阶段A 从 2026-10-07 起改为要求「每行一个独立 JSON 对象」（JSONL）：
+    # 模型不必再维护一个 22 层的巨型数组，结构错位没有容器可以逃。
+    # 这里把行重组成数组，下面同一条解析链照跑；万一某个对象跨了行，
+    # 第五级按大括号深度切的逻辑照样救得回来。模型若仍回吐整数组也直接兼容。
+    if text[:1] == "{":
+        text = "[\n" + ",\n".join(l.strip().rstrip(",") for l in text.splitlines() if l.strip()) + "\n]"
     start, end = text.find("["), text.rfind("]")
     if start != -1 and end > start:
         json_text = text[start:end+1]
