@@ -914,6 +914,69 @@ def _resolve_url(item, url_index, raw_results, log_match=True):
         return "", idx
 
 
+# LLM 把 "title" 写到对象右括号外面（2026-10-07 线上 22 条里中了 11 条，整数组解析失败当天零交付）
+_STRAY_TITLE_RE = re.compile(r'\}\s*,\s*("title"\s*:\s*"(?:[^"\\]|\\.)*")\s*\}')
+
+
+def _split_top_objects(body):
+    """把 JSON 数组体切成顶层对象字符串，字符串内部（含转义）的花括号不计数。"""
+    out, depth, start = [], 0, None
+    in_str = esc = False
+    for i, c in enumerate(body):
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                out.append(body[start:i + 1])
+                start = None
+    return out
+
+
+def _salvage_items(json_text, log):
+    """整数组解析失败时的最后手段：逐条抢救，一条坏不牵连其余。
+
+    返回 (items, n_dropped)。宁可少几条也不能整期归零——归零意味着当天零交付，
+    而且旧逻辑还照常发邮件/写CSV/退出0，故障在 GitHub 上是绿的，没人会发现。
+    """
+    body = json_text.strip()
+    if body.startswith("["):
+        body = body[1:]
+    if body.endswith("]"):
+        body = body[:-1]
+
+    fixed_all = _STRAY_TITLE_RE.sub(lambda m: ", " + m.group(1) + "}", body)
+    items, dropped = [], 0
+    for chunk in _split_top_objects(fixed_all):
+        obj = None
+        for cand in (chunk, _STRAY_TITLE_RE.sub(lambda m: ", " + m.group(1) + "}", chunk)):
+            try:
+                obj = json.loads(cand)
+                break
+            except (json.JSONDecodeError, ValueError):
+                continue
+        if isinstance(obj, dict):
+            items.append(obj)
+        else:
+            dropped += 1
+            log.error(f"  JSON抢救失败，丢弃该条: {chunk[:80]}")
+    if items:
+        log.warning(f"JSON逐条抢救成功: 救回 {len(items)} 条，丢弃 {dropped} 条")
+    return items, dropped
+
+
 def summarize_news(raw_results):
     if not raw_results:
         return []
@@ -1104,7 +1167,9 @@ def summarize_news(raw_results):
                         parsed = json.loads("\n".join(repaired))
                         log.info("JSON修复成功（补全缺失key）")
                     except json.JSONDecodeError:
-                        pass
+                        # 第五级：逐条抢救。上面四级都是「整数组要么全成要么全废」，
+                        # 而 payload 是单行时三、四级按行切的逻辑根本不会触发（2026-10-07 即此情形）。
+                        parsed = _salvage_items(json_text, log)[0] or None
         if parsed:
                 for i, item in enumerate(parsed):
                     # URL修正：统一用 _resolve_url 回填
@@ -1611,10 +1676,11 @@ def summarize_news(raw_results):
                     pass
                 return parsed
 
-    log.warning("JSON 解析失败，使用兜底内容")
-    return [{"index": 1, "category": "其他", "title": "科技前沿简报", "summary": raw_text[:500],
-             "source_url": "", "source_name": "AI汇总", "author": "", "comments": "",
-             "selected": False, "score": 0}]
+    # 返回空列表而不是兜底假条目：main() 见到空会 exit(1)，workflow 才会重试一次。
+    # 旧行为是塞一条 score 0 的假条目继续往下走——邮件照发、CSV 照写、退出码 0，
+    # GitHub 显示绿色 success，当天简报静默消失（2026-10-07 线上即此故障）。
+    log.error(f"JSON 解析彻底失败，本期无内容可交付（原始输出 {len(raw_text)} 字，见 llm_raw.txt）")
+    return []
 
 
 # ── 3. Render HTML ────────────────────────────────────────────────────────────
