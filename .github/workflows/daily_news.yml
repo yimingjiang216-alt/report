@@ -1,10 +1,9 @@
 name: 科技前沿简报
 
 on:
-  # schedule 已禁用（GitHub 定时会延迟数小时甚至漏跑，改用外部 cron-job.org 准点触发 workflow_dispatch）
-  # 需要恢复时取消下面注释：
-  # schedule:
-  #   - cron: '30 0 * * *'  # UTC 00:30 = 北京时间 08:30
+  schedule:
+    # UTC 00:30 = 北京时间 08:30，每天跑一次
+    - cron: '30 0 * * *'
   workflow_dispatch:  # 支持手动触发 / 外部 cron 触发
     inputs:
       feishu_webhook_test:
