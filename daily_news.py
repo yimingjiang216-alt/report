@@ -1648,6 +1648,11 @@ def summarize_news(raw_results):
                                     if _is_same_event(item, final):
                                         continue
                                     if not allow_dup and _is_dup(item):
+                                        # 这四个 _is_dup 调用点里唯独这里以前不打标：
+                                        # 这里被挡下的条目既不入选、又没标记，交付出口认不出它
+                                        # 是跨期重复，就作为「落选动态」随邮件发出去了。
+                                        item["_dup_prev"] = True
+                                        log.info(f"  跨期去重(补位): [{item.get('title','')[:30]}]")
                                         continue
                                     item["selected"] = True
                                     final.append(item)
@@ -1661,6 +1666,21 @@ def summarize_news(raw_results):
                                     log.info(f"  复核补位: [{item.get('title','')[:30]}]")
                     except Exception as e:
                         log.warning(f"  跨期复核失败（保留原选择）: {e}")
+
+                # ── 尾部补一次跨期判定 ──
+                # 阶段1 一旦凑满 5 条就 break，后面的条目根本没走过 _is_dup；而邮件/PDF/看板
+                # 拿的是「入选5条 + 落选全部」整份列表，所以尾部那条重复新闻每天都可能照发。
+                # 2026-10-11 实测：当期 22 条里 4 条与上期重复，阶段1 只挡下 3 条，
+                # 「Beam Global收购挪威无人机公司ScoutDI」从没被扫过，就这样进了邮件。
+                # 这里对全部未入选条目补跑同一个判定（纯 bigram，不调 LLM，开销可忽略），
+                # 打标交给 main() 的交付出口拦；入选条目一律不动，阶段2「放宽旧闻」的语义保持原样。
+                if prev_bigrams_list:
+                    for it in all_sorted:
+                        if it.get("selected") or it.get("_dup_prev"):
+                            continue
+                        if _is_dup(it):
+                            it["_dup_prev"] = True
+                            log.info(f"  跨期去重(尾部): [{it.get('title','')[:30]}]")
 
                 # 重组：selected在前，其余在后
                 rest = [it for it in all_sorted if not it.get("selected")]
@@ -2096,10 +2116,16 @@ def generate_brief(news_items, report_date):
 # 避免重跑时给同一个群/同一个邮箱发两遍。按天命名，第二天自然失效。
 _DELIVER_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# 日戳进程内只算一次。以前这两个文件名各取「调用那一刻」的 UTC 日期，一次运行只要
+# 跨过 UTC 午夜（23:5x 起、或重试链拖过零点）就会：重试找的是「明天」的选稿文件——读不到
+# → 走全新选稿；也看不到「昨天」的送达标记 → 邮件再发一遍。这正是落盘续传要避免的
+# 「邮件发第一趟、飞书补第二趟」，被日期边界复活。main() 里 report_date 在开头定死，
+# 这两个文件必须跟同一次运行绑定，而不是跟墙上时钟绑定。
+_RUN_DAY = datetime.now(timezone.utc).strftime("%Y%m%d")
+
 
 def _delivery_mark_path():
-    return os.path.join(_DELIVER_DIR,
-                        f"_delivered_{datetime.now(timezone.utc).strftime('%Y%m%d')}.mark")
+    return os.path.join(_DELIVER_DIR, f"_delivered_{_RUN_DAY}.mark")
 
 
 def _already_delivered(kind):
@@ -2127,8 +2153,7 @@ def _mark_delivered(kind):
 # 同一天重跑直接复用；也把重试耗时从整套 LLM（约 7 分钟）缩到渲染交付（约 1 分钟）。
 
 def _issue_path():
-    return os.path.join(_DELIVER_DIR,
-                        f"_issue_{datetime.now(timezone.utc).strftime('%Y%m%d')}.json")
+    return os.path.join(_DELIVER_DIR, f"_issue_{_RUN_DAY}.json")
 
 
 def _save_issue(report_date, news_items):
