@@ -1,10 +1,9 @@
 name: 科技前沿简报
 
 on:
-  schedule:
-    # UTC 00:30 = 北京时间 08:30，每天跑一次
-    - cron: '30 0 * * *'
-  workflow_dispatch:  # 支持手动触发
+  # 不用 GitHub 自带的 schedule：2026-10-09 晚到 6 小时、10-10/10-11 直接没触发。
+  # 定时由外部 cron-job.org 每天 08:30 调 workflow_dispatch API（见 外部定时触发配置.md）。
+  workflow_dispatch:  # 手动 / 外部定时触发
     inputs:
       feishu_webhook_test:
         description: '试跑：粘贴测试群 webhook（该次不发邮件、不更新去重库）。留空=正式跑'
