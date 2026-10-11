@@ -13,6 +13,13 @@ on:
 permissions:
   contents: write  # 允许 git push last_sent.json
 
+# 同一天的触发串行执行：后触发的排队而不是并发跑。并发时两个 run 读到的
+# last_sent.json 都还是昨天的日期，「今天已发过」日闸拦不住；而且两边各自
+# push last_sent.json 会互相顶掉（10-10 去重库丢行就是这个 race）。
+concurrency:
+  group: digest
+  cancel-in-progress: false  # 不取消正在跑的正式一期，只排队
+
 jobs:
   run-digest:
     runs-on: ubuntu-latest

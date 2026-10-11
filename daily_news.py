@@ -2185,11 +2185,10 @@ def main():
 
     # ── 当期选稿续传：失败重试按续传处理，不重新拉素材、不重调 LLM ──
     _reuse = None if TEST_MODE else _load_issue()
-    if _reuse is not None:
+    if _reuse and _reuse[0]:
         report_date, news_items = _reuse
         subject = f"📡 科技前沿简报 · {report_date}"
-        _n_sel = sum(1 for i in news_items if i.get("selected") is True)
-        log.info(f"复用今天已生成的选稿（{_n_sel} 条入选）——续传模式，跳过素材拉取与 AI 汇总")
+        log.info(f"复用今天已生成的选稿（{len(news_items)} 条候选）——续传模式，跳过素材拉取与 AI 汇总")
     else:
         log.info("【Step 1】拉取 RSS 新闻...")
         raw_results, _ = search_news()
@@ -2260,7 +2259,24 @@ def main():
         if not news_items:
             log.error("AI 汇总失败，退出")
             sys.exit(1)
-        _save_issue(report_date, news_items)
+        if not TEST_MODE:      # 试跑不落选稿盘：同一目录里接着跑正式一期时不能被复用
+            _save_issue(report_date, news_items)
+
+    # ── 退化闸门：一条都没入选 = 这一期选稿塌了。不发空简报，且把当期选稿删掉，
+    # 让 workflow 的重试真的重新拉素材+重新选稿，而不是续传这副坏样子。
+    _n_sel = sum(1 for i in news_items if i.get("selected") is True)
+    if _n_sel == 0:
+        try:
+            os.remove(_issue_path())
+            log.warning("  已删除当期选稿文件——下次重试会重新选稿")
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log.warning(f"  删除当期选稿失败（不影响本次退出）: {e}")
+        log.error(f"【Step 3 前置检查】本期 0 条入选（候选 {len(news_items)} 条）——"
+                  "判定为选稿退化：不发空简报、不写去重库，exit 1 触发重试重选")
+        sys.exit(1)
+    log.info(f"本期入选 {_n_sel} 条（候选 {len(news_items)} 条）")
 
     log.info("【Step 3】渲染 HTML...")
     html_content = render_html(news_items, report_date)
