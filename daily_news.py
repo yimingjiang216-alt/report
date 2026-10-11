@@ -582,7 +582,7 @@ def search_news():
                     all_articles.append(art)
 
     log.info(f"RSS 共拉取 {len(all_articles)} 篇（去重后，丢弃{dropped_stale}篇 {FRESH_WINDOW_DAYS} 天以外的旧文；"
-             f"其中一手新闻室按7天窗口多留了{kept_slow}篇）")
+             f"其中一手新闻室按{max(SLOW_FRESH_WINDOWS.values()) if SLOW_FRESH_WINDOWS else FRESH_WINDOW_DAYS}天窗口多留了{kept_slow}篇）")
     if not all_articles:
         return [], []
 
@@ -1381,7 +1381,10 @@ def summarize_news(raw_results):
                     # 拆分成公司列表
                     parts = [p.strip().lower() for p in re.split(r"[、,，;；]", comps) if p.strip()]
                     # 合并大小写和别名归一，返回全部公司集合
-                    return tuple(parts) if parts else ("",)
+                    # 没有公司名就返回空集合。以前返回 ("",)，于是所有无公司名的条目
+                    # 共用同一个假公司「」：第二条分数<8 就被「同公司限制」挡掉，
+                    # 兜底阶段更是把它们整批跳过——政策类（国务院/民航局）正是高分来源。
+                    return tuple(parts)
 
                 def _get_track(item):
                     """从category中提取赛道"""
@@ -1453,6 +1456,8 @@ def summarize_news(raw_results):
                         log.info(f"  赛道外限额: [{item.get('title','')[:30]}] 本期最多{AD_MAX_PER_ISSUE}条，跳过")
                         continue
                     if _is_dup(item):
+                        # 打标而不是只跳过：落选条目仍会随邮件全量发出，出口靠这个标记拦
+                        item["_dup_prev"] = True
                         log.info(f"  跨期去重: [{item.get('title','')}]")
                         continue
                     if _is_same_event(item, final):
@@ -1508,6 +1513,8 @@ def summarize_news(raw_results):
                             log.info(f"  赛道外限额: [{item.get('title','')[:30]}] 本期最多{AD_MAX_PER_ISSUE}条，跳过")
                             continue
                         is_dup = _is_dup(item)
+                        if is_dup:
+                            item["_dup_prev"] = True
                         # 放宽逻辑：跨期重复但分数≥6的，允许进入补位（重要旧闻不丢）
                         if is_dup and score < 6:
                             continue
@@ -1621,6 +1628,7 @@ def summarize_news(raw_results):
                                 if u and u in used_urls:
                                     used_urls.discard(u)
                                 it["selected"] = False
+                                it["_dup_prev"] = True      # 语义重复更要拦：出口不许再发
                                 log.info(f"  跨期复核剔除: [{it.get('title','')[:30]}]")
                             # 补位：先只用非跨期重复条目；实在凑不满再允许旧闻补位
                             # 与阶段1/2/3同口径：0分闸和自动驾驶限额在这条路径上同样生效，
@@ -2262,9 +2270,15 @@ def main():
         if not TEST_MODE:      # 试跑不落选稿盘：同一目录里接着跑正式一期时不能被复用
             _save_issue(report_date, news_items)
 
-    # ── 退化闸门：一条都没入选 = 这一期选稿塌了。不发空简报，且把当期选稿删掉，
-    # 让 workflow 的重试真的重新拉素材+重新选稿，而不是续传这副坏样子。
+    # ── 退化闸门 + 交付出口收口：一条都没入选 = 这一期选稿塌了，不发空简报，且把当期
+    # 选稿删掉，让 workflow 的重试真的重新拉素材+重新选稿，而不是续传这副坏样子。
+    # 交付出口收口：被明确判为「跨期重复」或「无关/0分」的条目，一条都不许进任何渠道。
+    # 落选但正常的新闻照旧随邮件发出（简报=前5+其余动态，不是只发前5）。
+    # 为什么必须收这个口：选稿阶段只在挑前5时躲开重复，而邮件/PDF/看板CSV 拿的是
+    # 「入选5条 + 落选全部」整份列表——2026-10-11 线上实测，日志刚打完
+    # 「跨期去重: [NVIDIA承诺五年内向美国科学投资10亿美元]」，这条就排在当期第 6 张卡发出去了。
     _n_sel = sum(1 for i in news_items if i.get("selected") is True)
+    _n_all = len(news_items)
     if _n_sel == 0:
         try:
             os.remove(_issue_path())
@@ -2276,7 +2290,13 @@ def main():
         log.error(f"【Step 3 前置检查】本期 0 条入选（候选 {len(news_items)} 条）——"
                   "判定为选稿退化：不发空简报、不写去重库，exit 1 触发重试重选")
         sys.exit(1)
-    log.info(f"本期入选 {_n_sel} 条（候选 {len(news_items)} 条）")
+    _keep = [it for it in news_items if it.get("selected") is True
+             or (int(it.get("score", 0) or 0) > 0 and not it.get("_dup_prev"))]
+    _n_cut = _n_all - len(_keep)
+    if _n_cut:
+        log.info(f"  交付出口剔除 {_n_cut} 条（跨期重复/0分），不进邮件、PDF、看板、飞书")
+    news_items = _keep
+    log.info(f"本期入选 {_n_sel} 条，交付共 {len(news_items)} 条（候选 {_n_all} 条）")
 
     log.info("【Step 3】渲染 HTML...")
     html_content = render_html(news_items, report_date)
