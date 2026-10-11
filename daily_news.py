@@ -2113,6 +2113,59 @@ def _mark_delivered(kind):
         log.warning(f"  写送达标记失败: {e}")
 
 
+# ── 当期选稿落盘：失败重试是「续传」不是「重选」 ──
+# workflow 的失败重试会整脚本重跑，而 LLM 归并有随机性，两趟可能选出不同的 5 条，
+# 会造成邮件发第一趟的、飞书补发第二趟的，两边对不上。选稿一完成就落盘，
+# 同一天重跑直接复用；也把重试耗时从整套 LLM（约 7 分钟）缩到渲染交付（约 1 分钟）。
+
+def _issue_path():
+    return os.path.join(_DELIVER_DIR,
+                        f"_issue_{datetime.now(timezone.utc).strftime('%Y%m%d')}.json")
+
+
+def _save_issue(report_date, news_items):
+    try:
+        with open(_issue_path(), "w", encoding="utf-8") as f:
+            json.dump({"report_date": report_date, "news_items": news_items},
+                      f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        log.warning(f"  选稿落盘失败（不影响本次交付，只影响失败重试的续传）: {e}")
+
+
+def _load_issue():
+    """读当天的选稿。返回 (report_date, news_items)；没有/损坏返回 (None, None)。"""
+    try:
+        with open(_issue_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        rd, items = data.get("report_date", ""), data.get("news_items")
+        if rd and isinstance(items, list) and items:
+            return rd, items
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.warning(f"  读取当期选稿失败，按全新一期处理: {e}")
+    return None, None
+
+
+def _sent_today_repo(report_date):
+    """仓库里 last_sent.json 的日期是否=今天，作为「今天已发过」闸的数据源。
+    Actions 的二次触发/UI Re-run 会换全新工作目录，本地 mark 文件全丢，
+    只有随仓库提交的 last_sent.json 靠得住（2026-10-09 同一天三次触发、
+    正式群收三期的教训）。读不到就按没发过处理——宁可重发，不可漏发。"""
+    try:
+        with open(os.path.join(_DELIVER_DIR, "last_sent.json"), encoding="utf-8") as f:
+            return json.load(f).get("date", "") == report_date
+    except Exception:
+        return False
+
+
+def _mid_recovery():
+    """同一次 job 的续传中：邮件/飞书恰好送达了一个（如邮件成功、飞书失败等重试）。
+    这时要放行往下补另一个渠道，不能被「今天已发过」闸拦死。"""
+    e, f = _already_delivered("email"), _already_delivered("feishu")
+    return (e or f) and not (e and f)
+
+
 def main():
     log.info("=" * 60)
     log.info("科技前沿简报 开始运行")
@@ -2122,89 +2175,106 @@ def main():
     log.info(f"报告日期: {report_date}")
     subject = f"📡 科技前沿简报 · {report_date}"
 
-    log.info("【Step 1】拉取 RSS 新闻...")
-    raw_results, _ = search_news()
+    # ── 「今天已发过」闸：仓库 last_sent.json 日期=今天且邮件飞书都已送达，直接退出。
+    # 拦的是换全新工作目录的二次触发（cron 双发/手滑/界面 Re-run）；同一次 job 内
+    # 的续传（恰好一个渠道已送达）要放行，往下补另一个渠道。
+    if not TEST_MODE and _sent_today_repo(report_date) and not _mid_recovery():
+        log.info("今天已发过完整一期（last_sent 日期=今天、邮件飞书均已送达），跳过本次触发。"
+                 "确需重发：临时改 last_sent.json 的 date 字段再跑，或走测试模式")
+        sys.exit(0)
 
-    log.info("【Step 1b】调用 aihot API 获取 AI 精选动态...")
-    aihot_results = fetch_aihot_api(limit=AIHOT_MATERIAL_MAX)
-    if aihot_results:
-        raw_results = raw_results + aihot_results
-        log.info(f"合并 aihot 后共 {len(raw_results)} 篇素材")
+    # ── 当期选稿续传：失败重试按续传处理，不重新拉素材、不重调 LLM ──
+    _reuse = None if TEST_MODE else _load_issue()
+    if _reuse is not None:
+        report_date, news_items = _reuse
+        subject = f"📡 科技前沿简报 · {report_date}"
+        _n_sel = sum(1 for i in news_items if i.get("selected") is True)
+        log.info(f"复用今天已生成的选稿（{_n_sel} 条入选）——续传模式，跳过素材拉取与 AI 汇总")
+    else:
+        log.info("【Step 1】拉取 RSS 新闻...")
+        raw_results, _ = search_news()
+
+        log.info("【Step 1b】调用 aihot API 获取 AI 精选动态...")
+        aihot_results = fetch_aihot_api(limit=AIHOT_MATERIAL_MAX)
+        if aihot_results:
+            raw_results = raw_results + aihot_results
+            log.info(f"合并 aihot 后共 {len(raw_results)} 篇素材")
 
 
 
-    # Step 1c: 无 RSS 博客爬取（JS渲染网站暂无效，由其他源间接覆盖）
+        # Step 1c: 无 RSS 博客爬取（JS渲染网站暂无效，由其他源间接覆盖）
 
-    if not raw_results:
-        log.error("无结果，退出")
-        sys.exit(1)
+        if not raw_results:
+            log.error("无结果，退出")
+            sys.exit(1)
 
-    # ── 过滤旧文章：默认只保留最近 FRESH_WINDOW_DAYS 天，一手新闻室按其窗口（RSS 采样阶段已筛过一遍，这里兜底 aihot 等补充源）──
-    cutoff, slow_cutoffs = _fresh_cutoffs()
-    fresh_results = []
-    dropped_unknown = 0
-    dropped_old = 0
-    for item in raw_results:
-        # 统一从 pub_utc / pub / pub_date / published 拿时间，并按 UTC 归一
-        pub_clean = _pub_utc_str(item)[:10]
-        # 时间缺失/格式异常的，谨慎处理：丢弃，避免把旧闻当新闻
-        if not pub_clean:
-            dropped_unknown += 1
-            log.info(f"  无时间丢弃: [{(item.get('title','') or '')[:40]}] 来源:{item.get('source','')}")
-            continue
-        # 兜底筛也必须用同一套窗口，否则采样阶段给一手新闻室放宽的7天在这里又被砍掉
-        item_cutoff = slow_cutoffs.get(item.get("source", ""), cutoff)
-        if pub_clean < item_cutoff:
-            dropped_old += 1
-            continue
-        item.setdefault("_age_h", _age_hours(item))
-        fresh_results.append(item)
-    log.info(f"过滤旧文章: {len(raw_results)} → {len(fresh_results)} 篇（丢弃{dropped_old}条过期、{dropped_unknown}条无时间）")
-    raw_results = fresh_results
-    if not raw_results:
-        log.error("过滤后无有效素材（所有文章时间缺失或过期），退出")
-        sys.exit(1)
+        # ── 过滤旧文章：默认只保留最近 FRESH_WINDOW_DAYS 天，一手新闻室按其窗口（RSS 采样阶段已筛过一遍，这里兜底 aihot 等补充源）──
+        cutoff, slow_cutoffs = _fresh_cutoffs()
+        fresh_results = []
+        dropped_unknown = 0
+        dropped_old = 0
+        for item in raw_results:
+            # 统一从 pub_utc / pub / pub_date / published 拿时间，并按 UTC 归一
+            pub_clean = _pub_utc_str(item)[:10]
+            # 时间缺失/格式异常的，谨慎处理：丢弃，避免把旧闻当新闻
+            if not pub_clean:
+                dropped_unknown += 1
+                log.info(f"  无时间丢弃: [{(item.get('title','') or '')[:40]}] 来源:{item.get('source','')}")
+                continue
+            # 兜底筛也必须用同一套窗口，否则采样阶段给一手新闻室放宽的7天在这里又被砍掉
+            item_cutoff = slow_cutoffs.get(item.get("source", ""), cutoff)
+            if pub_clean < item_cutoff:
+                dropped_old += 1
+                continue
+            item.setdefault("_age_h", _age_hours(item))
+            fresh_results.append(item)
+        log.info(f"过滤旧文章: {len(raw_results)} → {len(fresh_results)} 篇（丢弃{dropped_old}条过期、{dropped_unknown}条无时间）")
+        raw_results = fresh_results
+        if not raw_results:
+            log.error("过滤后无有效素材（所有文章时间缺失或过期），退出")
+            sys.exit(1)
 
-    # ── 保存精选素材清单到 dp3 文件夹，方便溯源 ──
-    try:
-        dp3_dir = os.environ.get("DP3_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dp3"))
-        os.makedirs(dp3_dir, exist_ok=True)
-        date_tag = datetime.now().strftime("%Y%m%d")
-        raw_list_path = os.path.join(dp3_dir, f"素材清单_{date_tag}.csv")
+        # ── 保存精选素材清单到 dp3 文件夹，方便溯源 ──
+        try:
+            dp3_dir = os.environ.get("DP3_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dp3"))
+            os.makedirs(dp3_dir, exist_ok=True)
+            date_tag = datetime.now().strftime("%Y%m%d")
+            raw_list_path = os.path.join(dp3_dir, f"素材清单_{date_tag}.csv")
 
-        with open(raw_list_path, "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["序号", "来源", "标题", "链接", "发布时间"])
-            for idx, item in enumerate(raw_results, 1):
-                pub = item.get("pub", "") or item.get("pub_date", "")
-                pub_clean = pub[:16].replace("T", " ") if pub else "未知"
-                title = item.get("title", "")
-                if len(title) > 80:
-                    title = title[:80] + "…"
-                writer.writerow([idx, item.get("source", ""), title, item.get("url", ""), pub_clean])
-        log.info(f"✅ 素材清单已保存: {raw_list_path}（共 {len(raw_results)} 篇）")
-    except Exception as e:
-        log.warning(f"保存素材清单失败: {e}")
+            with open(raw_list_path, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["序号", "来源", "标题", "链接", "发布时间"])
+                for idx, item in enumerate(raw_results, 1):
+                    pub = item.get("pub", "") or item.get("pub_date", "")
+                    pub_clean = pub[:16].replace("T", " ") if pub else "未知"
+                    title = item.get("title", "")
+                    if len(title) > 80:
+                        title = title[:80] + "…"
+                    writer.writerow([idx, item.get("source", ""), title, item.get("url", ""), pub_clean])
+            log.info(f"✅ 素材清单已保存: {raw_list_path}（共 {len(raw_results)} 篇）")
+        except Exception as e:
+            log.warning(f"保存素材清单失败: {e}")
 
-    log.info("【Step 2】AI 汇总...")
-    news_items = summarize_news(raw_results)
-    if not news_items:
-        log.error("AI 汇总失败，退出")
-        sys.exit(1)
+        log.info("【Step 2】AI 汇总...")
+        news_items = summarize_news(raw_results)
+        if not news_items:
+            log.error("AI 汇总失败，退出")
+            sys.exit(1)
+        _save_issue(report_date, news_items)
 
     log.info("【Step 3】渲染 HTML...")
     html_content = render_html(news_items, report_date)
 
     log.info("【Step 4】发送邮件...")
     if TEST_MODE:
-        success = True
+        email_ok = True
         log.info("  测试模式：跳过邮件发送")
     elif _already_delivered("email"):
-        success = True
+        email_ok = True
         log.info("  本期邮件已发过（重跑），跳过避免重复发送")
     else:
-        success = send_email(html_content, subject)
-        if success:
+        email_ok = send_email(html_content, subject)
+        if email_ok:
             _mark_delivered("email")
 
     log.info("【Step 5】写入 CSV...")
@@ -2217,16 +2287,25 @@ def main():
     log.info("【Step 6】生成 PDF...")
     generate_brief(news_items, report_date)
 
+    # 飞书失败视同邮件失败：exit 1 触发 workflow 重试续传，mark 保证已送达的渠道不重发。
+    # 之前飞书失败只记日志、照样 exit 0——当天没推送、GitHub 绿色、去重库照写，
+    # 第二天这些标题还被跨期去重掐掉，那天的简报就静默没了。
     log.info("【Step 7】推送飞书...")
     if _already_delivered("feishu"):
+        feishu_ok = True
         log.info("  本期飞书已推送过（重跑），跳过避免重复推送")
     else:
-        if send_feishu(news_items, report_date):
+        feishu_ok = send_feishu(news_items, report_date)
+        if feishu_ok:
             _mark_delivered("feishu")
 
     # ── 保存本期标题，供跨期去重（保留最近3期=15条） ──
+    # 至少一个渠道真送达了才写：两个都失败时读者根本没看到本期，写进去反而会让
+    # 明天的跨期去重把没发出去的条目掐掉，等于替没送达的内容占坑。
     if TEST_MODE:
         log.info("  测试模式：跳过 last_sent.json 写入，去重库保持不变")
+    elif not (email_ok or feishu_ok):
+        log.warning("  邮件和飞书均未送达，本期不写去重库——明天这些条目仍可重新入选")
     elif _already_delivered("last_sent"):
         # 重跑时不覆盖：上期第一次尝试已经发出去并写库了，用那一版才对得上读者实际看到的内容
         log.info("  本期去重库已写入（重跑），跳过避免用未发送的版本覆盖")
@@ -2256,11 +2335,12 @@ def main():
         except Exception as e:
             log.warning(f"保存 last_sent.json 失败: {e}")
 
-    if success:
+    if email_ok and feishu_ok:
         log.info("🎉 全流程完成！")
         sys.exit(0)
     else:
-        log.error("邮件发送失败")
+        _failed = "、".join(n for n, ok in (("邮件", email_ok), ("飞书", feishu_ok)) if not ok)
+        log.error(f"交付未完成（{_failed}失败）——exit 1 触发 workflow 重试续传，已送达的渠道有标记不会重发")
         sys.exit(1)
 
 
