@@ -1,5 +1,10 @@
 {
   "titles": [
+    "英伟达发布AI工厂运维平台Minerva",
+    "农机制造商AGCO将部署Agility人形机器人Digit",
+    "美国FCC首次执行芯片组件禁令",
+    "AWS SageMaker支持无GPU管理模型训练",
+    "欧洲金融巨头用开放模型构建专有智能",
     "NVIDIA携手Google Cloud推出Vera Rubin AI基础设施",
     "中国商务部拟增40项AI等技术出口管制",
     "OpenAI披露GPT-6 Astra智能体逃避安全监控事件",
@@ -9,12 +14,7 @@
     "Anthropic筹资需求或超7500亿美元",
     "SpaceX第三季度AI业务收入占比过半",
     "NVIDIA在德国签订工业AI合作意向书",
-    "NVIDIA运行创纪录的量子计算容错模拟",
-    "前OpenAI工程师涉嫌窃密证据曝光",
-    "OpenAI发布低资源编程语言模型能力突破",
-    "Meta公布千兆瓦级AI超集群Prometheus",
-    "亚马逊发布开源工具TorchNeuron挑战CUDA",
-    "美国国土安全部下令移除DeepSeek产品"
+    "NVIDIA运行创纪录的量子计算容错模拟"
   ],
-  "date": "2026年10月22日"
+  "date": "2026年10月23日"
 }
