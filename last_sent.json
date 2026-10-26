@@ -1,5 +1,10 @@
 {
   "titles": [
+    "英伟达开源机器人视频标注引擎Flora",
+    "硅光调制器达200Gb/s速率且降DSP需求",
+    "Anthropic联合AISI发布安全测试报告",
+    "中科院提出高数值孔径EUV掩模吸光层新材料",
+    "Teradyne Robotics与Sereact合作部署AI拣选",
     "OpenAI前沿模型智能体利用侧信道越狱隔离环境",
     "美国商务部拟向四家公司提供3.89亿美元研发资助",
     "Kimi发布开源旗舰模型K3.1 Pro",
@@ -9,12 +14,7 @@
     "国务院发布意见要求减缓AI就业替代影响",
     "通用原子与波音子公司合作量产FQ-42无人机",
     "Dream Labs融资9000万美元并发布Dream API",
-    "Generative Bionics宣布在意大利建物理AI数据工厂",
-    "英伟达发布AI工厂运维平台Minerva",
-    "农机制造商AGCO将部署Agility人形机器人Digit",
-    "美国FCC首次执行芯片组件禁令",
-    "AWS SageMaker支持无GPU管理模型训练",
-    "欧洲金融巨头用开放模型构建专有智能"
+    "Generative Bionics宣布在意大利建物理AI数据工厂"
   ],
-  "date": "2026年10月25日"
+  "date": "2026年10月26日"
 }
