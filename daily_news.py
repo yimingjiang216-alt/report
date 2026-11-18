@@ -189,8 +189,15 @@ LLM_EVENT_MAX = 22      # 单次 LLM 输出的事件条数上限，防正文生�
 # 订单量破纪录这类才到8+。放行的条目仍要和赛道内条目一起过比较趟，不是保送。
 AD_KWS = ["自动驾驶", "无人驾驶", "无人车", "无人卡车", "无人重卡",
           "robotaxi", "智驾", "辅助驾驶", "fsd", "waymo", "self-driving"]
-AD_LANDMARK_MIN = 8
+AD_LANDMARK_MIN = 9
 AD_MAX_PER_ISSUE = 1    # 每期最多留几条赛道外的标志性事件：超过1条就等于变相给它开了赛道
+
+# 地方性/常规监管动作：不是跨行业突破。自动驾驶条目命中这些词一律不收，
+# 不管模型给了几分——2026-11-18 加州车管局禁止 Waymo 上高速被 qwen3.5 打了8分放行，
+# 挤掉了同分的人形机器人新闻，根因就是门槛只认分数不认事件性质。
+AD_LOCAL_REG_KWS = ["车管局", "dmv", "交管局", "交通局", "州政府", "市政府",
+                    "市政厅", "地方", "区长", "市长", "suspend", "suspension",
+                    "吊销", "暂扣", "限行", "禁止上", "禁行"]
 
 # ── 选题裁定层：三层链路（收 / 判 / 选）里的「收」──────────────────────────
 # 一条事件要不要收、算哪个赛道，只在 admit_event() 里决定；
@@ -233,6 +240,101 @@ def _item_score(item):
         return 0
 
 
+def _strip_track_tags(category):
+    """去掉 category 里的五大赛道词，只留性质标签（产业动态/技术突破）。
+
+    赛道外条目必须剥干净：_offtopic_landmark 只在 _get_track() 里被读到，
+    发飞书/邮件的渲染函数读的是 item["category"]。2026-11-18 那条 Waymo
+    新闻大模型自己贴了「具身机器人、产业动态」，admit_event 判成赛道外后
+    直接 return，category 没洗，于是后台日志写「赛道外·自动驾驶」、
+    群里卡片却顶着【具身机器人】发出去。
+    """
+    cats = [c.strip() for c in (category or "").replace("/", "、").split("、") if c.strip()]
+    kept = [c for c in cats if c not in TRACK_KWS]
+    return "、".join(kept) if kept else "产业动态"
+
+
+def _needs_punct_fix(summary):
+    """摘要是否缺断句：40字以上却一个逗号都没有，或整段没有句号。"""
+    s = (summary or "").strip()
+    if not s:
+        return False
+    if len(s) > 40 and "，" not in s and "," not in s:
+        return True
+    if "。" not in s:
+        return True
+    return False
+
+
+def _fix_summary_punct_batch(items):
+    """把缺断句的摘要一次性交给模型补标点（批量，避免逐条调用）。
+
+    2026-11-18 线上现象：英伟达那条摘要在飞书卡片上是一整段没有逗号的文字。
+    根因是 Prompt 只要求「每句以句号结尾」、没要求句中断句，出口检查也只做
+    长度截断、不看标点；换默认模型为 qwen3.5-122b-a10b 后长句倾向更明显。
+
+    为什么不用正则补逗号：实测按字数均分、按虚词锚点插逗号，在中文上都会
+    切到词中间（「美，元」「模，型」）。标点位置是语义问题，交给模型判断。
+    为什么批量：单次调用实测首 token 100-140 秒，逐条补 5 条要多等 10 分钟；
+    一次调用补全部，只花一次往返。
+    """
+    todo = [(i, it) for i, it in enumerate(items) if _needs_punct_fix(it.get("summary", ""))]
+    if not todo:
+        return
+
+    lines = []
+    for n, (_, it) in enumerate(todo, 1):
+        summary = (it.get("summary", "") or "").strip()
+        lines.append(f"{n}. 标题：{it.get('title','')}\n   摘要：{summary}")
+
+    prompt = (
+        "下面是一批科技新闻摘要，每条都标点缺失、读起来没有断句。"
+        "请只做一件事：为每一条补全标点。要求：\n"
+        "1. 每条字数与原句基本一致（±10字），不得增删事实、数字、公司名；\n"
+        "2. 每条切分成2-4个短句，句中该停的地方必须有逗号，句子之间用句号；\n"
+        "3. 严格按「序号. 摘要内容」每行输出一条，序号与输入一一对应；\n"
+        "4. 不要任何解释、不要引号、不要空行。\n\n" + "\n".join(lines)
+    )
+
+    try:
+        out = call_llm([{"role": "user", "content": prompt}]).strip()
+    except Exception as e:
+        log.warning(f"  摘要补标点失败（保留原文）: {e}")
+        return
+
+    fixed = {}
+    for ln in out.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        m = re.match(r"^(\d+)\s*[.、)]\s*(.+)$", ln)
+        if not m:
+            continue
+        n = int(m.group(1))
+        text = m.group(2).strip().strip("\"'\u201c\u201d")
+        if 1 <= n <= len(todo):
+            fixed[n] = text
+
+    applied = 0
+    for n, (idx, it) in enumerate(todo, 1):
+        text = fixed.get(n)
+        original = (it.get("summary", "") or "").strip()
+        if not text:
+            continue
+        # 长度校验：拒绝模型大幅改写或截断
+        if abs(len(text) - len(original)) > max(20, int(len(original) * 0.35)):
+            log.warning(f"  摘要补标点长度异常，保留原文: [{it.get('title','')[:18]}] "
+                        f"{len(original)}→{len(text)}")
+            continue
+        if "，" not in text and len(text) > 40:
+            log.warning(f"  摘要补标点后仍无逗号，保留原文: [{it.get('title','')[:18]}]")
+            continue
+        items[idx]["summary"] = text
+        applied += 1
+
+    log.info(f"  摘要补标点: {applied}/{len(todo)} 条成功")
+
+
 def admit_event(item):
     """选题裁定，返回 'track' / 'landmark' / 'reject'。
     'reject' 时已把 score 归零并标记 _irrelevant；'track' 时赛道写在 item["_kw_track"]。
@@ -247,14 +349,22 @@ def admit_event(item):
     # 不收进五大赛道是她的口径；若放任宽桶命中，常规智驾新闻会因为摘要里
     # 顺带出现「AI/算法」而被悄悄收走——收录与否就变成了看措辞，不是看事件。
     if kw_title in ("", "AI大模型") and any(k in title for k in AD_KWS):
-        if score < AD_LANDMARK_MIN:
+        local_reg = next((k for k in AD_LOCAL_REG_KWS if k in blob), "")
+        if score < AD_LANDMARK_MIN or local_reg:
             item["score"] = 0
             item["_irrelevant"] = True
+            reason = (f"命中地方监管词「{local_reg}」" if local_reg
+                      else f"分{score}<{AD_LANDMARK_MIN}")
             log.info(f"  无关新闻过滤: [{item.get('title','')[:24]}] → 强制0分"
-                     f"（自动驾驶非常规赛道，分{score}<{AD_LANDMARK_MIN}）")
+                     f"（自动驾驶非常规赛道，{reason}）")
             return "reject"
         item["_offtopic_landmark"] = True
         item["_kw_track"] = ""
+        # 关键：把大模型乱贴的赛道标签洗掉，否则前台渲染会把它当成具身机器人发出去
+        old_cat = item.get("category", "")
+        item["category"] = _strip_track_tags(old_cat)
+        if old_cat != item["category"]:
+            log.info(f"  赛道外洗标: [{item.get('title','')[:24]}] {old_cat} → {item['category']}")
         log.info(f"  赛道外放行: [{item.get('title','')[:24]}] 自动驾驶 分{score}"
                  f"≥{AD_LANDMARK_MIN}，交比较趟裁定")
         return "landmark"
@@ -1089,7 +1199,8 @@ def summarize_news(raw_results):
 【输出要求】
 对合并后的每个独立事件输出：
 1. title: 标题严格控制在18-22个中文字符以内（绝对不能超过22字！超过必须精简），直接说事，包含核心主语和关键事实，不要写成两个分句。专有名词（公司名、产品名、人名）必须写完整，宁可超字数也绝对不得缩写（如"特斯拉"不得写成"特斯"）
-2. summary: 严格100-130字，超过130字算不合格，宁可短不可长。说清是什么、关键数据/背景、为什么重要/产业影响，每句以句号结尾，不用"本文""该公司"等套话
+2. summary: 严格100-130字，超过130字算不合格，宁可短不可长。说清是什么、关键数据/背景、为什么重要/产业影响，不用"本文""该公司"等套话。
+   **断句是硬要求**：必须写成3-4个短句，每句25-40字，句子之间用句号。**句中该用逗号的地方必须用逗号**（并列、转折、因果），严禁一个长句从头贯到尾、中间不加任何标点。写完后自查：如果整段只有最后一个句号、中间没有逗号，就是不合格，必须重写。
 3. key_point: ≤25字结论
 4. category: 两层标签，用顿号连接：
 
@@ -1766,6 +1877,11 @@ def summarize_news(raw_results):
                         item["companies"] = "、".join(dict.fromkeys(detected)) if detected else ""
 
                 log.info(f"LLM 返回 {len(parsed)} 条简报")
+                # 摘要标点兜底：只在确有缺断句的条目时触发，批量一次调用
+                try:
+                    _fix_summary_punct_batch(parsed)
+                except Exception as e:
+                    log.warning(f"摘要补标点整体失败（不影响交付）: {e}")
                 # 保存代码处理后的最终结果（供调试）
                 try:
                     final_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "final_result.json")
