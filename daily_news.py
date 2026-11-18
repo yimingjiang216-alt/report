@@ -884,6 +884,7 @@ def call_llm(messages):
     payload = {
         "model": LLM_MODEL,
         "max_tokens": 16384,
+        "enable_thinking": False,
         "messages": messages,
         "stream": True,
     }
