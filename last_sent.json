@@ -1,5 +1,10 @@
 {
   "titles": [
+    "谷歌开源TPU Sync并发布TPU 8tx与8i Max",
+    "受禁英伟达Blackwell现身上海Alice Huang数据中心",
+    "蚂蚁灵波开源LingBot-Map 2.0与导航模型Navi",
+    "Trainium3跑LTX-2.5生成十秒带声视频仅22秒",
+    "InternLM开源全双工语音视频模型Sage-Interaction",
     "英伟达暂停向东南亚四国出货服务器",
     "381个智能体直播攻关P=NP，GitHub被挤爆",
     "美参议员提案延长半导体投资税收抵免五年",
@@ -9,12 +14,7 @@
     "Anthropic五个月将Claude API重写为Rust",
     "数千枚英伟达B300涌入海外GPU转售市场",
     "DeepMind发布质谱解析技能Mass Spec Skills",
-    "五角大楼五亿美元招标远程打击无人机",
-    "OpenAI湿实验验证GPT-6蛋白质设计能力",
-    "Anthropic发布Siren沙盒越界安全评估",
-    "Sand.ai发布四百八十亿参数视频模型MAGI-2",
-    "软银完成收购Raibert的机器人与AI研究所",
-    "谷歌提出DeepCrossAttention改造残差连接"
+    "五角大楼五亿美元招标远程打击无人机"
   ],
-  "date": "2026年11月27日"
+  "date": "2026年11月28日"
 }
